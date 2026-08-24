@@ -13,12 +13,13 @@ import json
 import os
 import re
 import statistics
-import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from mk_prompt_ids import write_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL = ROOT / "model" / "Qwen3.8-27B-Q4_0.gguf"
@@ -145,7 +146,7 @@ def tok_s(bin_path: Path, omp: int) -> float:
     """decode-only via wall(n=8)-wall(n=2)."""
     prompt = ROOT / "prompt1.ids"
     if not prompt.exists():
-        prompt.write_bytes(struct.pack("<i", 248044))
+        write_ids(prompt)
     env = os.environ.copy()
     env.update(
         {

@@ -95,7 +95,9 @@ static const int ROPE_SEC[3] = {11, 11, 10};
 enum { T_F32=0, T_Q4_0=2, T_Q4_1=3, T_Q8_0=8, T_Q5_K=13, T_Q6_K=14,
        T_Q4_0R=100,  /* packed 20B {qs,d} from CWENR v2 */
        T_Q4_0RS=101, /* split: qs[16*nb*ne1] + f16 sc[nb*ne1] (v3) */
-       T_Q4_0RSI=102 /* interleaved dual: (qsA|qsB)*nb, (scA|scB)*nb per row (v4) */ };
+       T_Q4_0RSI=102, /* interleaved dual: (qsA|qsB)*nb, (scA|scB)*nb per row (v4) */
+       T_Q8S=103,     /* drafter split Q8: int8 stream + f16 scale channel */
+       T_Q8SI=104 };  /* drafter paired split Q8: rows alternate A,B */
 #define QK4 32
 #define QK_K 256
 /* CWENR directory flags (v4) */
@@ -233,6 +235,7 @@ static const int DL_TAPS[DL_TAPN] = { 5, 19, 33, 47, 61 };
 #define DL_ROPE_THETA 1e7f
 typedef struct {
   Tensor q, k, v, o, gate, up, down;
+  Tensor gu, kv;                /* paired split-Q8: gate+up, k+v */
   Tensor ln1, ln2, qn, kn;
   Tensor ac_base, mc_base;      /* [2*2*H] f32 */
   Tensor ac_proj, mc_proj;      /* [H -> 2*k*groups] */
@@ -1261,6 +1264,7 @@ static size_t row_bytes(int type, int ne0) {
     case T_Q4_0RSI: return q4rsi_row_qs(ne0); /* interleaved qsA|qsB per block */
     case T_Q4_1: return (size_t)(ne0/QK4)*sizeof(block_q4_1);
     case T_Q8_0: return (size_t)(ne0/QK4)*sizeof(block_q8_0);
+    case T_Q8S:  return (size_t)ne0 + (size_t)(ne0/QK4)*2;
     case T_Q5_K: return (size_t)(ne0/QK_K)*sizeof(block_q5_K);
     case T_Q6_K: return (size_t)(ne0/QK_K)*sizeof(block_q6_K);
     default: return 0; /* unused tensors (e.g. unknown quants) */
@@ -1272,7 +1276,8 @@ static size_t row_bytes(int type, int ne0) {
 static int matmul_type_ok(int ty) {
   switch(ty){
     case T_F32: case T_Q4_0: case T_Q4_1: case T_Q8_0: case T_Q5_K: case T_Q6_K:
-    case T_Q4_0R: case T_Q4_0RS: case T_Q4_0RSI: return 1;
+    case T_Q4_0R: case T_Q4_0RS: case T_Q4_0RSI:
+    case T_Q8S: return 1; /* split-Q8 (drafter); Q8SI consumed via df_dual_gemvb */
     default: return 0;
   }
 }
@@ -1288,6 +1293,49 @@ static inline void cwen_pf_w(const void *p) {
 
 /* Row kernel: static inline so fused call sites can be one OMP loop + inlined bodies.
    Globals hold activations; pass only W / x / row index. */
+/* split-Q8 dot (drafter): int8 stream contiguous, f16 scale channel beside it.
+   Scales pointer comes from the Tensor; row index selects both rows. */
+static inline float dot_q8s(const Tensor *restrict W, const float *restrict x,
+                            int row) {
+  const int K=W->ne0, nb=K/QK4;
+  const int8_t *q=(const int8_t*)W->data+(size_t)row*K;
+  const uint16_t *sc=(const uint16_t*)W->scales+(size_t)row*nb;
+  __m256 acc=_mm256_setzero_ps();
+#if defined(CWEN_AVX512)
+  __m512 accH=_mm512_setzero_ps();
+#endif
+  for(int b=0;b<nb;b++){
+    const __m128i q0=_mm_loadl_epi64((const __m128i*)(q+b*32));
+    const __m128i q1=_mm_loadl_epi64((const __m128i*)(q+b*32+8));
+    const __m128i q2=_mm_loadl_epi64((const __m128i*)(q+b*32+16));
+    const __m128i q3=_mm_loadl_epi64((const __m128i*)(q+b*32+24));
+    const __m256 vd=_mm256_set1_ps(f16_to_f32(sc[b]));
+#if defined(CWEN_AVX512)
+    accH=_mm512_fmadd_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(q3)),vd),
+                         _mm512_loadu_ps(x+b*32+24),accH);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q0)),vd),
+                        _mm256_loadu_ps(x+b*32),acc);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1)),vd),
+                        _mm256_loadu_ps(x+b*32+8),acc);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2)),vd),
+                        _mm256_loadu_ps(x+b*32+16),acc);
+#else
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q0)),vd),
+                        _mm256_loadu_ps(x+b*32),acc);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1)),vd),
+                        _mm256_loadu_ps(x+b*32+8),acc);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2)),vd),
+                        _mm256_loadu_ps(x+b*32+16),acc);
+    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q3)),vd),
+                        _mm256_loadu_ps(x+b*32+24),acc);
+#endif
+  }
+#if defined(CWEN_AVX512)
+  return hsum256(acc)+_mm512_reduce_add_ps(accH);
+#else
+  return hsum256(acc);
+#endif
+}
 static inline float gemv_row(const Tensor *W, const float *x, int i) {
   /* an unknown type here would return 0.f and poison downstream activations
      silently; load-time validators accept exactly matmul_type_ok's set */
@@ -1311,6 +1359,7 @@ static inline float gemv_row(const Tensor *W, const float *x, int i) {
     case T_Q5_K:  return dot_q5_K((const block_q5_K*)row,x,K);
     case T_Q6_K:  return dot_q6_K((const block_q6_K*)row,x,K);
     case T_Q8_0:  return dot_q8_0((const block_q8_0*)row,x,K);
+    case T_Q8S:   return dot_q8s(W,x,i); /* split layout: needs row index */
     case T_F32:   return dot_f32((const float*)row,x,K);
     default: return 0.f;
   }
@@ -2718,16 +2767,95 @@ static void df_top16(const float *lg,int *idx) {
    their absolute position; values raw). Called exactly once per token that
    becomes part of the verified context. taps points at [5][H] captured
    target residual states in layer order. */
+/* paired split-Q8 dual dot: physical rows [2r]=A, [2r+1]=B share x loads */
+static inline void dot_q8si(const Tensor *restrict W, int r,
+                            const float *restrict x,
+                            float *restrict ya, float *restrict yb) {
+  const int K=W->ne0, nb=K/QK4;
+  const size_t rb=(size_t)K+(size_t)nb*2;
+  const int8_t *qa=(const int8_t*)W->data+(size_t)(2*r)*rb;
+  const int8_t *qb=qa+rb;
+  const uint16_t *sa=(const uint16_t*)(qa+K);
+  const uint16_t *sb=(const uint16_t*)(qb+K);
+  __m256 aa=_mm256_setzero_ps(), ab=_mm256_setzero_ps();
+#if defined(CWEN_AVX512)
+  __m512 aaH=_mm512_setzero_ps(), abH=_mm512_setzero_ps();
+#endif
+  for(int b=0;b<nb;b++){
+    __m256 da=_mm256_set1_ps(f16_to_f32(sa[b]));
+    __m256 db=_mm256_set1_ps(f16_to_f32(sb[b]));
+    const __m128i a0=_mm_loadl_epi64((const __m128i*)(qa+b*32));
+    const __m128i a1=_mm_loadl_epi64((const __m128i*)(qa+b*32+8));
+    const __m128i a2=_mm_loadl_epi64((const __m128i*)(qa+b*32+16));
+    const __m128i a3=_mm_loadl_epi64((const __m128i*)(qa+b*32+24));
+    const __m128i b0=_mm_loadl_epi64((const __m128i*)(qb+b*32));
+    const __m128i b1=_mm_loadl_epi64((const __m128i*)(qb+b*32+8));
+    const __m128i b2=_mm_loadl_epi64((const __m128i*)(qb+b*32+16));
+    const __m128i b3=_mm_loadl_epi64((const __m128i*)(qb+b*32+24));
+    const __m256 xl0=_mm256_loadu_ps(x+b*32), xl1=_mm256_loadu_ps(x+b*32+8);
+    const __m256 xh0=_mm256_loadu_ps(x+b*32+16), xh1=_mm256_loadu_ps(x+b*32+24);
+#if defined(CWEN_AVX512)
+    const __m512 xl=_mm512_loadu_ps(x+b*32), xh=_mm512_loadu_ps(x+b*32+16);
+    __m512 wa0=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a0)),da);
+    __m512 wa1=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a1)),da);
+    __m512 wa2=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a2)),da);
+    __m512 wa3=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a3)),da);
+    __m512 wb0=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b0)),db);
+    __m512 wb1=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b1)),db);
+    __m512 wb2=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b2)),db);
+    __m512 wb3=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b3)),db);
+    aa=_mm512_fmadd_ps(wa0,xl,aa); aaH=_mm512_fmadd_ps(wa1,xh,aaH);
+    aa=_mm512_fmadd_ps(wa2,xl,aa); aaH=_mm512_fmadd_ps(wa3,xh,aaH);
+    ab=_mm512_fmadd_ps(wb0,xl,ab); abH=_mm512_fmadd_ps(wb1,xh,abH);
+    ab=_mm512_fmadd_ps(wb2,xl,ab); abH=_mm512_fmadd_ps(wb3,xh,abH);
+#else
+    __m256 wa0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a0)),da);
+    __m256 wa1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a1)),da);
+    __m256 wa2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a2)),da);
+    __m256 wa3=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a3)),da);
+    __m256 wb0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b0)),db);
+    __m256 wb1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b1)),db);
+    __m256 wb2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b2)),db);
+    __m256 wb3=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(b3)),db);
+    aa=_mm256_fmadd_ps(wa0,xl0,aa); aa=_mm256_fmadd_ps(wa1,xl1,aa);
+    aa=_mm256_fmadd_ps(wa2,xh0,aa); aa=_mm256_fmadd_ps(wa3,xh1,aa);
+    ab=_mm256_fmadd_ps(wb0,xl0,ab); ab=_mm256_fmadd_ps(wb1,xl1,ab);
+    ab=_mm256_fmadd_ps(wb2,xh0,ab); ab=_mm256_fmadd_ps(wb3,xh1,ab);
+#endif
+  }
+#if defined(CWEN_AVX512)
+  *ya=hsum256(acc)+_mm512_reduce_add_ps(aaH);
+  *yb=hsum256(ab)+_mm512_reduce_add_ps(abH);
+#else
+  *ya=hsum256(aa); *yb=hsum256(ab);
+#endif
+}
+/* batched dual pass over all B window columns for a Q8SI pair tensor */
+static void df_dual_gemvb(const Tensor *Wt,const float *X,int xs,
+                          float *YA,int yas,float *YB,int ybs,int B){
+  const int M=Wt->ne1/2;   /* manifest ne1 counts both matrices' rows */
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for(int r=0;r<M;r++)
+    for(int b=0;b<B;b++)
+      dot_q8si(Wt,r,X+(size_t)b*xs,YA+(size_t)b*yas+r,YB+(size_t)b*ybs+r);
+}
 static void dflash_commit(int pos,const float *taps) {
   assert(pos>=0&&pos<g_ctx);
   float *ctxrow=Dctx+(size_t)pos*H;
   gemv(&Dw_fc,taps,ctxrow);
   rmsnorm(ctxrow,ctxrow,(const float*)Dw_hnorm.data,H);
   for(int l=0;l<DL_LAYERS;l++){
+    DraftW *w=&DW[l];
     float *kd=Dkc+((size_t)l*CTX_STRIDE+pos)*DL_KV;
     float *vd=Dvc+((size_t)l*CTX_STRIDE+pos)*DL_KV;
-    gemv(&DW[l].k,ctxrow,kd);
-    gemv(&DW[l].v,ctxrow,vd);
+    if(w->kv.data)
+      df_dual_gemvb(&w->kv,ctxrow,H,kd,DL_KV,vd,DL_KV,1);
+    else{
+      gemv(&w->k,ctxrow,kd);
+      gemv(&w->v,ctxrow,vd);
+    }
     df_head_norm(kd,(const float*)DW[l].kn.data,DL_NKV);
     for(int h=0;h<DL_NKV;h++) rope_std_apply(kd+(size_t)h*DL_HD,pos);
   }
@@ -2785,8 +2913,9 @@ static void df_layer(int l,int P,int B) {
                 DdynA+(size_t)b*1280,(const float*)w->ac_base.data,
                 Din_t+(size_t)b*H);
   gemvb(&w->q,Din_t,H,Dq_t,DL_Q,B);
-  gemvb(&w->k,Din_t,H,Dkw_t,DL_KV,B);
-  gemvb(&w->v,Din_t,H,Dvw_t,DL_KV,B);
+  if(w->kv.data) df_dual_gemvb(&w->kv,Din_t,H,Dkw_t,DL_KV,Dvw_t,DL_KV,B);
+  else{ gemvb(&w->k,Din_t,H,Dkw_t,DL_KV,B);
+        gemvb(&w->v,Din_t,H,Dvw_t,DL_KV,B); }
   for(int b=0;b<B;b++){
     int pos=P+b;
     df_head_norm(Dq_t+(size_t)b*DL_Q,(const float*)w->qn.data,DL_NH);
@@ -2811,8 +2940,9 @@ static void df_layer(int l,int P,int B) {
     df_conv_row(Dln_t+(size_t)b*H,b?Dln_t+(size_t)(b-1)*H:NULL,
                 DdynM+(size_t)b*1280,(const float*)w->mc_base.data,
                 Din_t+(size_t)b*H);
-  gemvb(&w->gate,Din_t,H,Bhb,I,B);
-  gemvb(&w->up,Din_t,H,Bhb2,I,B);
+  if(w->gu.data) df_dual_gemvb(&w->gu,Din_t,H,Bhb,I,Bhb2,I,B);
+  else{ gemvb(&w->gate,Din_t,H,Bhb,I,B);
+        gemvb(&w->up,Din_t,H,Bhb2,I,B); }
   for(int b=0;b<B;b++) silu_mul(Bhb+(size_t)b*I,Bhb2+(size_t)b*I,I);
   gemvb(&w->down,Bhb,I,Doh_t,H,B);
   for(int b=0;b<B;b++)
@@ -3280,6 +3410,10 @@ static uint64_t dflash_tensor_bytes(uint32_t typ,uint32_t ne0,uint32_t ne1){
   switch(typ){
     case 0: return (uint64_t)ne0*ne1*4u;
     case 1: return (uint64_t)(ne0/QK4)*sizeof(block_q4_0r)*ne1;
+    case 3: /* Q8S: int8 stream + f16 scale channel */
+      return (uint64_t)ne1*((uint64_t)ne0+(uint64_t)(ne0/QK4)*2);
+    case 4: /* Q8SI pair: manifest ne1 counts BOTH matrices' rows */
+      return (uint64_t)ne1*((uint64_t)ne0+(uint64_t)(ne0/QK4)*2);
     default: return (uint64_t)(ne0/QK4)*sizeof(block_q8_0)*ne1;
   }
 }
@@ -3310,7 +3444,6 @@ static void load_dflash(const char *path) {
     memcpy(&typ8,p+8,8);                    /* type stored as u64 */
     memcpy(&off,p+16,8);memcpy(&nb,p+24,8); p+=32;
     typ=(uint32_t)typ8;
-    if(typ>2) dflash_bad("unknown tensor type");
     /* dims must cast to a positive int and quant rows need whole QK4 blocks;
        nb is validated against this geometry below, never via Dmap_len-nb,
        which wraps when nb>Dmap_len and lets an oversized blob through */
@@ -3327,8 +3460,10 @@ static void load_dflash(const char *path) {
               (unsigned long long)dflash_tensor_bytes(typ,ne0,ne1));
       dflash_bad("nbytes does not match dims");
     }
-    Tensor t={ (const char*)Dmap+off,NULL,
-               typ==0?T_F32:typ==1?T_Q4_0R:T_Q8_0,(int)ne0,(int)ne1,0 };
+    int ctype = typ==0?T_F32 : typ==1?T_Q4_0R : typ==2?T_Q8_0 :
+                typ==3?T_Q8S  : T_Q8SI;
+    Tensor t={ (const char*)Dmap+off,NULL,ctype,(int)ne0,(int)ne1,0 };
+    if(ctype==T_Q8S)  t.scales=(const char*)Dmap+off+(size_t)ne0*(size_t)ne1;
     const char *suffix=NULL; int li=-1;
     if(!strncmp(name,"layers.",7)){
       char *endp; long idx=strtol(name+7,&endp,10);
@@ -3339,13 +3474,14 @@ static void load_dflash(const char *path) {
       DraftW *w=&DW[li];
       const char *m[]={ "q_proj","k_proj","v_proj","o_proj","gate","up","down",
                         "ln1","ln2","qn","kn","attn_conv_base","mlp_conv_base",
-                        "attn_conv_proj","mlp_conv_proj" };
+                        "attn_conv_proj","mlp_conv_proj","mlp_gu","attn_kv" };
       int hit=-1;
       for(unsigned k2=0;k2<sizeof m/sizeof*m;k2++)
         if(!strcmp(suffix,m[k2])){hit=(int)k2;break;}
       Tensor *dst[]={ &w->q,&w->k,&w->v,&w->o,&w->gate,&w->up,&w->down,
                       &w->ln1,&w->ln2,&w->qn,&w->kn,
-                      &w->ac_base,&w->mc_base,&w->ac_proj,&w->mc_proj };
+                      &w->ac_base,&w->mc_base,&w->ac_proj,&w->mc_proj,
+                      &w->gu,&w->kv };
       if(hit<0) dflash_bad("unknown drafter tensor");
       if(dst[hit]->data) { fprintf(stderr,"dflash: dup %s\n",name); dflash_bad("duplicate drafter tensor"); }
       *dst[hit]=t;
@@ -3368,11 +3504,19 @@ static void load_dflash(const char *path) {
   for(int l=0;l<DL_LAYERS;l++){
     DraftW *w=&DW[l];
     if(w->q.ne0!=H||w->q.ne1!=DL_Q) dflash_bad("q shape");
-    if(w->k.ne0!=H||w->k.ne1!=DL_KV) dflash_bad("k shape");
-    if(w->v.ne0!=H||w->v.ne1!=DL_KV) dflash_bad("v shape");
+    if(w->kv.data){
+      if(w->kv.ne0!=H||w->kv.ne1!=2*DL_KV) dflash_bad("attn_kv shape");
+    }else{
+      if(w->k.ne0!=H||w->k.ne1!=DL_KV) dflash_bad("k shape");
+      if(w->v.ne0!=H||w->v.ne1!=DL_KV) dflash_bad("v shape");
+    }
     if(w->o.ne0!=DL_Q||w->o.ne1!=H) dflash_bad("o shape");
-    if(w->gate.ne0!=H||w->gate.ne1!=I) dflash_bad("gate shape");
-    if(w->up.ne0!=H||w->up.ne1!=I) dflash_bad("up shape");
+    if(w->gu.data){
+      if(w->gu.ne0!=H||w->gu.ne1!=2*I) dflash_bad("mlp_gu shape");
+    }else{
+      if(w->gate.ne0!=H||w->gate.ne1!=I) dflash_bad("gate shape");
+      if(w->up.ne0!=H||w->up.ne1!=I) dflash_bad("up shape");
+    }
     if(w->down.ne0!=I||w->down.ne1!=H) dflash_bad("down shape");
     if(w->ac_proj.ne0!=H||w->ac_proj.ne1!=1280) dflash_bad("conv proj shape");
     if(w->mc_proj.ne0!=H||w->mc_proj.ne1!=1280) dflash_bad("conv proj shape");

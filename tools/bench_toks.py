@@ -15,11 +15,12 @@ import argparse
 import os
 import re
 import statistics
-import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from mk_prompt_ids import write_ids
 
 
 def parse_token_stream(raw: str, source: str) -> list[int]:
@@ -78,7 +79,7 @@ def main() -> int:
     model = root / args.model
     prompt = root / args.prompt
     if not prompt.exists():
-        prompt.write_bytes(struct.pack("<i", 248044))
+        write_ids(prompt)
 
     env = os.environ.copy()
     env.update(

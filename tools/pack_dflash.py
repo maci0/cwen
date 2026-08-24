@@ -30,7 +30,11 @@ import numpy as np
 
 MAGIC = b"DFSP"
 VERSION = 1
-T_F32, T_Q4R, T_Q8 = 0, 1, 2
+T_F32, T_Q4R, T_Q8, T_Q8S, T_Q8SI = 0, 1, 2, 3, 4
+# Q8S: split stream [int8 weights][f16 scales per 32-block row] - same values
+# as Q8 blocks, arranged for contiguous SIMD loads (CWENR philosophy).
+# Q8SI: two matrices sharing an input, physical rows alternating A,B; one
+# dual pass emits both outputs per weight stream.
 
 
 def load_safetensors(path: Path) -> dict[str, np.ndarray]:
@@ -92,6 +96,48 @@ def pack_q8(x: np.ndarray) -> bytes:
     return out.tobytes()
 
 
+def pack_q8s(x: np.ndarray) -> bytes:
+    """Split-stream Q8: [int8 weights row-major][f16 scales per 32-block]."""
+    ne1, ne0 = x.shape
+    nblk = ne0 // 32
+    xb = x.reshape(ne1, nblk, 32).astype(np.float32)
+    d = np.abs(xb).max(axis=2, keepdims=True) / np.float32(127.0)
+    inv = np.where(d != 0, np.float32(1.0) / d, np.float32(0.0))
+    q = np.clip(np.rint(xb * inv), -127, 127).astype(np.int8)
+    sc = d.astype("<f2").view(np.uint8).reshape(ne1, nblk * 2)
+    out = np.zeros((ne1, ne0 + nblk * 2), dtype=np.uint8)
+    out[:, :ne0] = q.reshape(ne1, ne0)
+    out[:, ne0:] = sc
+    return out.tobytes()
+
+
+def pack_q8si(a: np.ndarray, b: np.ndarray) -> bytes:
+    """Pair-interleaved split Q8: physical rows alternate A,B, each a complete
+    payload (int8 weights followed by its own f16 scales)."""
+    na, ne0 = a.shape
+    nb_, ne0b = b.shape
+    assert na == nb_ and ne0 == ne0b and ne0 % 32 == 0
+    nblk = ne0 // 32
+    rb = ne0 + nblk * 2
+
+    def rows(x: np.ndarray) -> np.ndarray:
+        xb = x.reshape(na, nblk, 32).astype(np.float32)
+        d = np.abs(xb).max(axis=2, keepdims=True) / np.float32(127.0)
+        inv = np.where(d != 0, np.float32(1.0) / d, np.float32(0.0))
+        q = np.clip(np.rint(xb * inv), -127, 127).astype(np.int8)
+        sc = d.astype("<f2").view(np.uint8).reshape(na, nblk * 2)
+        out = np.zeros((na, rb), dtype=np.uint8)
+        out[:, :ne0] = q.reshape(na, ne0)
+        out[:, ne0:] = sc
+        return out
+
+    ra, rbw = rows(a), rows(b)
+    inter = np.zeros((na * 2, rb), dtype=np.uint8)
+    inter[0::2] = ra
+    inter[1::2] = rbw
+    return inter.tobytes()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Pack the DFlash2 drafter safetensors into a .spec container."
@@ -112,6 +158,13 @@ def main() -> int:
         default="q8",
         help="drafter matmul precision. q8 recommended: q4 "
         "acceptance measured at zero on this model",
+    )
+    ap.add_argument(
+        "--layout",
+        choices=["blocks", "split"],
+        default="blocks",
+        help="split = CWENR-style streams (Q8S singles + Q8SI gate/up and "
+        "k/v pairs); requires a run binary with split-Q8 support",
     )
     args = ap.parse_args()
 
@@ -138,7 +191,7 @@ def main() -> int:
             a = a.reshape(1, -1)
         plan.append((name, a.shape[1], a.shape[0], typ, a))
 
-    add("fc", tensors["fc.weight"], big)
+    add("fc", tensors["fc.weight"], T_Q8S if args.layout == "split" else big)
     add("hidden_norm", tensors["hidden_norm.weight"].reshape(1, 5120), T_F32)
     add("norm", tensors["norm.weight"].reshape(1, 5120), T_F32)
     add("sel.pred", tensors["candidate_selector.predecessor_codebook"], T_Q8)
@@ -146,13 +199,28 @@ def main() -> int:
     add("sel.hproj", tensors["candidate_selector.hidden_projection.weight"], T_Q8)
     for li in range(5):
         p = f"layers.{li}."
-        add(p + "q_proj", tensors[p + "self_attn.q_proj.weight"], big)
-        add(p + "k_proj", tensors[p + "self_attn.k_proj.weight"], big)
-        add(p + "v_proj", tensors[p + "self_attn.v_proj.weight"], big)
-        add(p + "o_proj", tensors[p + "self_attn.o_proj.weight"], big)
-        add(p + "gate", tensors[p + "mlp.gate_proj.weight"], mlp)
-        add(p + "up", tensors[p + "mlp.up_proj.weight"], mlp)
-        add(p + "down", tensors[p + "mlp.down_proj.weight"], mlp)
+        q_typ = T_Q8S if args.layout == "split" else big
+        add(p + "q_proj", tensors[p + "self_attn.q_proj.weight"], q_typ)
+        if args.layout == "split":
+            kv = np.concatenate(
+                [tensors[p + "self_attn.k_proj.weight"], tensors[p + "self_attn.v_proj.weight"]]
+            )
+            add(p + "attn_kv", kv, T_Q8SI)
+        else:
+            add(p + "k_proj", tensors[p + "self_attn.k_proj.weight"], big)
+            add(p + "v_proj", tensors[p + "self_attn.v_proj.weight"], big)
+        o_typ = T_Q8S if args.layout == "split" else big
+        add(p + "o_proj", tensors[p + "self_attn.o_proj.weight"], o_typ)
+        if args.layout == "split":
+            gu = np.concatenate(
+                [tensors[p + "mlp.gate_proj.weight"], tensors[p + "mlp.up_proj.weight"]]
+            )
+            add(p + "mlp_gu", gu, T_Q8SI)
+        else:
+            add(p + "gate", tensors[p + "mlp.gate_proj.weight"], mlp)
+            add(p + "up", tensors[p + "mlp.up_proj.weight"], mlp)
+        dn_typ = T_Q8S if args.layout == "split" else mlp
+        add(p + "down", tensors[p + "mlp.down_proj.weight"], dn_typ)
         add(p + "ln1", tensors[p + "input_layernorm.weight"].reshape(1, 5120), T_F32)
         add(p + "ln2", tensors[p + "post_attention_layernorm.weight"].reshape(1, 5120), T_F32)
         add(p + "qn", tensors[p + "self_attn.q_norm.weight"].reshape(1, 128), T_F32)
@@ -171,9 +239,17 @@ def main() -> int:
     blobs = []
     off = payload_off
     for name, ne0, ne1, typ, arr in plan:
-        data = {T_F32: lambda a: a.astype("<f4").tobytes(), T_Q4R: pack_q4r, T_Q8: pack_q8}[typ](
-            arr
-        )
+        if typ == T_Q8SI:
+            half = arr.shape[0] // 2
+            data = pack_q8si(arr[:half], arr[half:])
+        else:
+            ser = {
+                T_F32: lambda a: a.astype("<f4").tobytes(),
+                T_Q4R: pack_q4r,
+                T_Q8: pack_q8,
+                T_Q8S: pack_q8s,
+            }[typ]
+            data = ser(arr)
         pad = (-len(data)) % 64
         data += b"\0" * pad
         entries.append((name, ne0, ne1, typ, off, len(data) - pad))

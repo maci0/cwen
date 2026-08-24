@@ -23,8 +23,9 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "A", "DTZ", "T10", "SLF", 
 [tool.ruff.lint.isort]
 # In-tree modules imported as libraries by other tools (not just run as
 # scripts): spec_check imports bench_toks and spec_e2e; spec_sweep imports
-# spec_e2e; e2e_ref/gen_golden/repack_q4 import gguf_util/ref_kernels.
-known-first-party = ["bench_toks", "gguf_util", "ref_kernels", "spec_e2e"]
+# spec_e2e; e2e_ref/gen_golden/repack_q4 import gguf_util/ref_kernels;
+# bench_toks/idea_bench/e2e_ref import mk_prompt_ids.
+known-first-party = ["bench_toks", "gguf_util", "mk_prompt_ids", "ref_kernels", "spec_e2e"]
 
 [tool.mypy]
 # Wired into `make lint` (mypy itself is a system package like shellcheck/cppcheck).

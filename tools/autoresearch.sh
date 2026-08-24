@@ -2,7 +2,7 @@
 # Decode-throughput bench for the Qwen3.8-27B autoresearch loop.
 # Prints DECODE_TOK_S=... and TOKENS=... for the logger.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 CC="${CC:-gcc}"

@@ -66,6 +66,13 @@ Lab notebook for the Qwen3.8-27B decode-throughput loop.
 - **Long context**: compile-time cap raised to 32768; `CWEN_CTX=N` sizes KV + drafter caches at runtime (every bound checks the runtime cap; strides shared). **Opt-in YaRN** (`CWEN_ROPE_YARN=orig,factor[,bf,bs]`) implements transformers `_compute_yarn_parameters` on this file's pinned inv axis (theta^(-idx/64), llama.cpp-verified): correction-dim ramp + get_mscale cos/sin scaling; defaults bit-stable. Verified: goldens green, 8.4k-token prefill at ctx 8192 completes, plain-vs-DFlash2 streams IDENTICAL, factor 16 measurably changes outputs.
 - **Drafter precision study** (`pack_dflash.py --prec q8|mixed|q4`): strawberry 48 tok acceptance - q8 avg kept 5.71 (5/7 full), mixed (attn q8 + mlp q4) 0.33, q4 0.00. All three byte-identical output vs serial. Conclusion: the DFlash2 drafter needs ~Q8 everywhere; do not ship q4 drafts.
 
+## 2026-08-24: split-Q8 drafter container experiment (negative result)
+
+- `pack_dflash.py --layout split`: CWENR-style split streams for the drafter (Q8S singles, Q8SI gate/up + k/v pairs). Loader + kernels (dot_q8s, dot_q8si, df_dual_gemvb) verified numerically exact; lossless gate passes.
+- **Measured: split layout is 0.19-0.60x block-Q8 on decode tok/s** (interleaved A/B, best-of-3). At Q4 the split wins because nibble unpacking dominates and separating scales enables pure-nibble streams; at Q8 the block format's inline f16 scale already sits next to its qs bytes — one load serves both. Split turns every scale read into a distant second stream that defeats prefetching.
+- Verdict: blocks is correct and optimal at Q8; split kept behind `--layout split` as a lossless-but-slower option. Do not use for production drafter containers.
+- Also fixed: dflash_commit ctx-K/V matvec now routes through df_dual_gemvb when pairs are bound (was calling gemv on unbound separate k/v tensors); loader accepts manifest types 3/4 with per-type byte accounting.
+
 ## 2026-08-23: speculation technique comparison documented
 
 - DESIGN.md "Speculative decoding landscape": baseline / MTP / DFlash / DFlash2 side by side (published Qwen3.8-27B acceptance lengths: MTP 4.28 mean vs DFlash2 4.80; DFlash superseded) plus every cwen-measured number: serial ~2.8 tok/s quiet-box, ngram 1.4-3.6x pattern workloads, DFlash2 Q8_0 avg kept 5.2-6.0 and 1.66x repeat-heavy wall (0.8x drifting), verify ceiling B=2/4/8 = 1.46x/2.69x/3.91x.

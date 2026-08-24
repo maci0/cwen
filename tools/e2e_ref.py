@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from gguf_util import GGUF
+from mk_prompt_ids import BOS
 from ref_kernels import dequant_row, gemv_np
 
 H, INTER, L = 5120, 17408, 64
@@ -223,7 +224,7 @@ def main() -> int:
         "residual/logit dumps for compare_e2e*.py."
     )
     ap.add_argument("--model", default="model/Qwen3.8-27B-Q4_0.gguf", help="GGUF model path")
-    ap.add_argument("--token", type=int, default=248044, help="first prompt token")
+    ap.add_argument("--token", type=int, default=BOS, help="first prompt token")
     ap.add_argument("--layers", type=int, default=4, help="run first N layers (0=all 64)")
     ap.add_argument("--out", default="golden/e2e", help="output directory for the dumps")
     ap.add_argument("--logits", action="store_true", help="compute full lm_head")
