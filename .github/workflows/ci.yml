@@ -20,7 +20,9 @@ jobs:
           python-version: "3.13"
 
       - name: python deps (tools)
-        run: uv pip install --system -r requirements.txt
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python -r requirements.txt
 
       - name: build (AVX2)
         run: make
