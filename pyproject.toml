@@ -1,0 +1,49 @@
+[tool.ruff]
+# tools/ scripts only; run.c is checked by the C toolchain (see `make lint`).
+line-length = 100
+# Track .python-version (3.13): ruff gates upgrades to newer syntax.
+target-version = "py313"
+# ref/SCRATCH/outputs are scratch + artifact areas by design; .venv is env.
+extend-exclude = [".venv", "ref", "SCRATCH", "outputs"]
+
+[tool.ruff.lint]
+# Baseline: pycodestyle, pyflakes, isort, pyupgrade, bugbear, simplify,
+# comprehensions, builtins-shadowing (A), naive-datetime (DTZ), debugger
+# leftovers (T10), private-access (SLF), modernization (FURB).
+# Extend in later passes (PL, RUF, BLE, ARG) once current findings are cleared.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "C4", "A", "DTZ", "T10", "SLF", "FURB"]
+ignore = [
+    # SIM115: gguf_util.GGUF.open keeps the fd alive under an mmap by design;
+    # the scoped noqa documents it at the site.
+]
+
+[tool.ruff.lint.isort]
+# In-tree modules imported as libraries by other tools (not just run as
+# scripts): spec_check imports bench_toks and spec_e2e; spec_sweep imports
+# spec_e2e; e2e_ref/gen_golden/repack_q4 import gguf_util/ref_kernels.
+known-first-party = ["bench_toks", "gguf_util", "ref_kernels", "spec_e2e"]
+
+[tool.mypy]
+# Wired into `make lint` (mypy itself is a system package like shellcheck/cppcheck).
+# python_executable pins import resolution to the project venv, so types come
+# from the same hash-checked lock that make setup installs (not from whichever
+# packages the system interpreter happens to have).
+python_executable = ".venv/bin/python"
+# Ratcheted: check_untyped_defs, extra_checks, strict_equality,
+# disallow_untyped_decorators, disallow_subclassing_any all pass clean.
+# strict = true remains blocked by the no-untyped-def family: 66 errors in
+# 14 files under --strict as of mypy 2.1 (2026-08-24); clear via later passes.
+# python_version must track .python-version: numpy's stubs use `type`
+# statements, which abort mypy when it targets anything below 3.12.
+python_version = "3.13"
+files = ["tools"]
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+no_implicit_reexport = true
+warn_unused_configs = true
+check_untyped_defs = true
+extra_checks = true
+strict_equality = true
+disallow_untyped_decorators = true
+disallow_subclassing_any = true

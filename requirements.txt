@@ -1,0 +1,16 @@
+# Python deps for tools/: direct pins live here; the full resolved tree with
+# sha256 hashes lives in requirements.lock (make lock regenerates it with
+# transitives frozen at constraints.txt, make setup installs from it, so
+# installs fail on tampered/mismatched wheels).
+# Pinned to the versions the goldens and benches were validated against.
+# Bump deliberately: re-run make verify / verify-e2e-full after any bump.
+# numpy: golden gen/accept, e2e refs, benches
+numpy==2.5.1
+# huggingface_hub: tools/download.sh GGUF fetch
+huggingface_hub==1.23.0
+# transformers: tools/tok.py prompt encoding (fast tokenizer)
+transformers==5.15.1
+# jinja2: transformers apply_chat_template (tools/tok.py --chat)
+jinja2==3.1.6
+# ruff: make lint (`python -m ruff`); shellcheck + cppcheck are system packages
+ruff==0.16.4

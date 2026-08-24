@@ -1,0 +1,29 @@
+# build outputs
+/run
+/bench_q4_gemv
+/bench_spec
+/bench-q4_gemv_tsan
+/fuzz_loader
+/run_prof
+*.o
+
+# build state
+/.build-flags*
+/.venv/
+/__pycache__/
+/.mypy_cache/
+/.ruff_cache/
+
+# weights + runtime artifacts (fetch via tools/download.sh / pack_dflash.py)
+/model/
+/golden/
+/outputs/
+/fuzz_out/
+/tools/fuzz_corpus/
+
+# scratch prompts and local state
+/*.ids
+/.gauntlet.lock
+/.semcode.db*
+/.scratch/
+/ref/

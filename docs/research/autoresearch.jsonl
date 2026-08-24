@@ -1,0 +1,100 @@
+{"ts": "2026-08-16T02:16:57", "iter": 0, "name": "baseline_gcc_avx512_omp16", "metric": "decode_tok_s", "value": 2.635, "unit": "tok/s", "direction": "higher", "decision": "keep_as_baseline", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "evidence": {"n2_median_s": 1.781, "n8_median_s": 4.057, "s_per_tok": 0.3795, "cc": "gcc", "avx512": 1, "omp": 16, "model": "model/Qwen3.8-27B-Q4_0.gguf"}, "notes": "Cold n=2 trial 4.057s excluded by median. Historical 3.6 was ~2.73 tok/s tokens 2 653."}
+{"ts": "2026-08-16T02:18:00", "iter": 2, "name": "clang22_avx512_omp16", "metric": "decode_tok_s", "value": 2.427, "unit": "tok/s", "direction": "higher", "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "delta_vs_best": -0.208, "notes": "clang-22 22.1.8 -flto -march=native slower than gcc 16.2.1. Tokens match. Keep gcc."}
+{"ts": "2026-08-16T02:23:17", "iter": 3, "name": "gdn_avx512_16wide_2row", "metric": "decode_tok_s", "value": 2.759, "unit": "tok/s", "direction": "higher", "decision": "keep", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "delta_vs_baseline": 0.124, "notes": "C-Kernel-Engine style GDN: AVX-512 16-wide FMA, 2-row unroll, unaligned S loads. Tokens match."}
+{"ts": "2026-08-16T02:23:17", "iter": 4, "name": "mask_pad16_plus_cephes_silu512", "metric": "decode_tok_s", "value": 2.723, "unit": "tok/s", "direction": "higher", "decision": "keep_quality_neutral", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "n8_median_s": 3.97, "n2_median_s": 1.767, "notes": "Zero-pad/mask tails + Cephes exp512 SiLU. Decode-only slightly down vs I03 because n=2 improved more than n=8; n=8 wall 3.970 vs 4.119. Tokens unchanged. Production dims already %16==0 so pad is branch-only."}
+{"ts": "2026-08-16T02:30:19", "iter": 5, "name": "cwenr_v4_sidecar", "metric": "decode_tok_s", "value": 2.682, "unit": "tok/s", "direction": "higher", "decision": "keep_layout_no_metric_win", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "Qwen3.8 CWENR v4 12.44 GiB, 352 tensors, 82 interleaved pairs. Tokens match. decode 2.682 < I03 2.759. Keep sidecar for dual-mat path; metric no win vs raw Q4_0 + AVX512 GDN."}
+{"ts": "2026-08-16T02:30:55", "iter": 6, "name": "gdn_omp_48heads", "metric": "decode_tok_s", "value": 2.792, "unit": "tok/s", "direction": "higher", "decision": "keep", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "delta_vs_prev_best": 0.033, "notes": "CWEN_IDEA_GDN_OMP=1 + AVX512 GDN + CWENR. Tokens match. Promote to default."}
+{"ts": "2026-08-16T02:31:27", "iter": 7, "name": "gcc_funroll_loops", "metric": "decode_tok_s", "value": 2.756, "unit": "tok/s", "direction": "higher", "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "-funroll-loops -ftree-vectorize no win vs 2.792."}
+{"ts": "2026-08-16T02:33:29", "iter": 8, "name": "omp8", "metric": "decode_tok_s", "value": 2.535, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T02:33:29", "iter": 9, "name": "omp12", "metric": "decode_tok_s", "value": 2.725, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T02:33:29", "iter": 10, "name": "omp20", "metric": "decode_tok_s", "value": 2.681, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T02:33:29", "iter": 11, "name": "omp24", "metric": "decode_tok_s", "value": 2.463, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "Cross-CCD. 16 still best."}
+{"ts": "2026-08-16T02:34:59", "iter": 12, "name": "conv_omp", "metric": "decode_tok_s", "value": 2.685, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "CONV_OMP fork tax on k=4 conv."}
+{"ts": "2026-08-16T02:35:56", "iter": 13, "name": "aligned_gdn_loads", "metric": "decode_tok_s", "value": 2.566, "decision": "revert_loads", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "aligned_alloc kept; _mm512_load_ps path slower. Reverted to loadu."}
+{"ts": "2026-08-16T02:36:33", "iter": 14, "name": "pipe_pf", "metric": "decode_tok_s", "value": 2.73, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T02:39:50", "iter": 15, "name": "sched_static", "value": 2.468, "decision": "revert", "notes": "chunkless static worse"}
+{"ts": "2026-08-16T02:39:50", "iter": 16, "name": "sched_static8", "value": 2.632, "decision": "revert"}
+{"ts": "2026-08-16T02:39:50", "iter": 17, "name": "sched_static16", "value": 2.754, "decision": "revert"}
+{"ts": "2026-08-16T02:39:50", "iter": 18, "name": "sched_static64", "value": 2.603, "decision": "revert"}
+{"ts": "2026-08-16T02:39:50", "iter": 19, "name": "sched_dynamic32_first", "value": 2.899, "decision": "suspect_n2_artifact", "notes": "first print 2.899; confirm 2.693. n=8 wall not better than I06 4.04s."}
+{"ts": "2026-08-16T02:39:50", "iter": 20, "name": "sched_dynamic32_confirm", "value": 2.693, "decision": "revert", "notes": "Keep static,32. Metric inflated by n=2 variance."}
+{"ts": "2026-08-16T02:39:50", "iter": 21, "name": "sched_dynamic16", "value": 2.614, "decision": "revert"}
+{"ts": "2026-08-16T03:06:26", "iter": 22, "name": "fuse_ssm_alpha_beta_serial", "metric": "decode_tok_s", "value": 2.383, "unit": "tok/s", "direction": "higher", "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "One serial loop two gemv_row + fused softplus/sigmoid. Tokens match. n=8 4.873s worse than I06 4.04s. Revert."}
+{"ts": "2026-08-16T03:06:59", "iter": 23, "name": "clang22_gdn_omp", "metric": "decode_tok_s", "value": 2.66, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "clang-22 with GDN_OMP still slower than gcc 2.792."}
+{"ts": "2026-08-16T03:08:15", "iter": 24, "name": "gcc_ofast", "metric": "decode_tok_s", "value": 2.536, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "Tokens match but slower. Keep -O3."}
+{"ts": "2026-08-16T03:10:25", "iter": 25, "name": "omp_thresh_64", "metric": "decode_tok_s", "value": 2.767, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "M>64 serializes ssm_alpha/beta (M=48). n=8 wall 4.673 worse than I06 4.04. Restore thresh 32."}
+{"ts": "2026-08-16T03:10:57", "iter": 26, "name": "bg_stream", "value": 2.613, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:11:57", "iter": 27, "name": "madv_seq", "value": 2.731, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:11:57", "iter": 28, "name": "pf_one", "value": 2.735, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:13:00", "iter": 29, "name": "march_znver5", "value": 2.527, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "explicit znver5 worse than -march=native"}
+{"ts": "2026-08-16T03:13:00", "iter": 30, "name": "no_lto", "value": 2.746, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:14:43", "iter": 31, "name": "prefetch4", "value": 2.628, "decision": "revert"}
+{"ts": "2026-08-16T03:14:43", "iter": 32, "name": "prefetch8", "value": 2.439, "decision": "revert"}
+{"ts": "2026-08-16T03:14:43", "iter": 33, "name": "prefetch32", "value": 2.522, "decision": "revert", "notes": "default PREFETCH=16 still best"}
+{"ts": "2026-08-16T03:15:45", "iter": 34, "name": "rope_avx512_table", "value": 2.831, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "decode-only inflated by slow n=2 (2.451s). n=8 wall 4.570 worse than I06 4.041. Reverted SIMD RoPE + table."}
+{"ts": "2026-08-16T03:16:43", "iter": 35, "name": "help_pf", "value": 2.741, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:16:43", "iter": 36, "name": "madvise_next_layer", "value": 2.485, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:18:07", "iter": 37, "name": "q4_pf_blocks4", "value": 2.656, "decision": "revert"}
+{"ts": "2026-08-16T03:18:07", "iter": 38, "name": "q4_pf_blocks8", "value": 2.563, "decision": "revert"}
+{"ts": "2026-08-16T03:18:07", "iter": 39, "name": "q4_pf_blocks24", "value": 2.635, "decision": "revert", "notes": "default 12 still best"}
+{"ts": "2026-08-16T03:20:07", "iter": 40, "name": "q4_unroll2", "value": 2.696, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:20:07", "iter": 41, "name": "omp_chunk32", "value": 2.455, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:20:07", "iter": 42, "name": "no_pair_gemv", "value": 2.761, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "PAIR_GEMV still slightly better"}
+{"ts": "2026-08-16T03:20:07", "iter": 43, "name": "no_mlp_team", "value": 2.375, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "MLP team fusion confirmed; unfuse hurts"}
+{"ts": "2026-08-16T03:21:59", "iter": 44, "name": "no_cwenr", "value": 2.614, "decision": "revert", "notes": "raw GGUF slower; keep sidecar"}
+{"ts": "2026-08-16T03:21:59", "iter": 45, "name": "multirow2", "value": 2.77, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:21:59", "iter": 46, "name": "no_ccd", "value": 2.693, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17]}
+{"ts": "2026-08-16T03:21:59", "iter": 47, "name": "no_warm", "value": 2.771, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "decode-only similar; first-token page-in not in this metric"}
+{"ts": "2026-08-16T03:24:46", "iter": 48, "name": "reconfirm_i06", "value": 2.647, "decision": "keep_as_current", "notes": "n=8 wall 4.592 vs original I06 4.041. Machine slower/hotter; tokens still match."}
+{"ts": "2026-08-16T03:24:46", "iter": 49, "name": "no_populate", "value": 2.436, "decision": "revert"}
+{"ts": "2026-08-16T03:24:46", "iter": 50, "name": "serial_mlp", "value": 2.161, "decision": "revert", "notes": "fusion required"}
+{"ts": "2026-08-16T03:24:46", "iter": 51, "name": "wait_active_first", "value": 3.037, "decision": "suspect_n2_artifact"}
+{"ts": "2026-08-16T03:24:46", "iter": 52, "name": "wait_active_confirm", "value": 2.66, "decision": "revert", "notes": "n=8 4.544 not better than I06 4.041"}
+{"ts": "2026-08-16T03:24:46", "iter": 53, "name": "wait_passive_confirm", "value": 2.467, "decision": "keep_default_passive"}
+{"ts": "2026-08-16T03:26:08", "iter": 54, "name": "gomp_spin0", "value": 2.734, "decision": "revert"}
+{"ts": "2026-08-16T03:26:08", "iter": 55, "name": "gomp_spin10", "value": 2.329, "decision": "revert"}
+{"ts": "2026-08-16T03:26:08", "iter": 56, "name": "gomp_spin1000", "value": 2.7, "decision": "revert", "notes": "default 100 stays"}
+{"ts": "2026-08-16T03:27:46", "iter": 57, "name": "pgo", "value": 2.762, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "profile-generate/use; some .gcda missing; n=8 4.753 no win"}
+{"ts": "2026-08-16T03:29:21", "iter": 58, "name": "ivdep_conv", "value": 2.662, "decision": "revert"}
+{"ts": "2026-08-16T03:29:21", "iter": 59, "name": "noplt", "value": 2.581, "decision": "revert"}
+{"ts": "2026-08-16T03:29:21", "iter": 60, "name": "visibility_hidden", "value": 2.667, "decision": "revert"}
+{"ts": "2026-08-16T03:30:16", "iter": 61, "name": "gdn_4row_unroll", "value": 2.77, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "4-row outer-product unroll no better than 2-row"}
+{"ts": "2026-08-16T03:31:42", "iter": 62, "name": "prefer_vec512", "value": 2.514, "decision": "revert"}
+{"ts": "2026-08-16T03:31:42", "iter": 63, "name": "silu_omp", "value": 2.524, "decision": "revert"}
+{"ts": "2026-08-16T03:31:42", "iter": 64, "name": "fast_silu", "value": 2.711, "decision": "revert", "tokens": [10586, 198, 64, 271, 198, 198, 198, 655], "notes": "QUALITY FAIL. Tokens changed. Confirms FAST_SILU is not quality-neutral."}
+{"ts": "2026-08-16T03:33:34", "iter": 65, "name": "copy_x", "value": 2.53, "decision": "revert"}
+{"ts": "2026-08-16T03:33:34", "iter": 66, "name": "no_pf", "value": 2.588, "decision": "revert", "notes": "prefetch still helps"}
+{"ts": "2026-08-16T03:33:34", "iter": 67, "name": "pf_t0", "value": 2.756, "decision": "revert"}
+{"ts": "2026-08-16T03:33:34", "iter": 68, "name": "proc_bind_spread", "value": 2.553, "decision": "revert", "notes": "close bind stays"}
+{"ts": "2026-08-16T03:35:25", "iter": 69, "name": "vnni", "value": 2.631, "decision": "revert", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "VNNI path no e2e win; tokens still match this time unlike prior FAIL on goldens"}
+{"ts": "2026-08-16T03:35:25", "iter": 70, "name": "madv_collapse", "value": 2.346, "decision": "revert"}
+{"ts": "2026-08-16T03:35:25", "iter": 71, "name": "sched_guided32", "value": 2.674, "decision": "revert"}
+{"ts": "2026-08-16T03:35:25", "iter": 72, "name": "places_cores", "value": 2.557, "decision": "revert"}
+{"ts": "2026-08-16T03:38:06", "iter": 73, "name": "opt_O2", "value": 2.654, "decision": "revert"}
+{"ts": "2026-08-16T03:38:06", "iter": 74, "name": "opt_Os", "value": 2.256, "decision": "revert"}
+{"ts": "2026-08-16T03:38:06", "iter": 75, "name": "omp14_first", "value": 2.907, "decision": "suspect_n2_artifact"}
+{"ts": "2026-08-16T03:38:06", "iter": 76, "name": "omp18", "value": 2.506, "decision": "revert"}
+{"ts": "2026-08-16T03:38:06", "iter": 77, "name": "omp14_confirm", "value": 2.728, "decision": "revert", "notes": "n=8 4.731 worse than 16"}
+{"ts": "2026-08-16T03:38:06", "iter": 78, "name": "omp16_reconfirm2", "value": 2.754, "decision": "keep_default", "notes": "n=8 4.629; machine slower than I06 4.041 but tokens match"}
+{"ts": "2026-08-16T03:39:52", "iter": 79, "name": "numactl_interleave", "value": 2.657, "decision": "revert", "notes": "single NUMA node"}
+{"ts": "2026-08-16T03:39:52", "iter": 80, "name": "malloc_arena1", "value": 2.763, "decision": "revert"}
+{"ts": "2026-08-16T03:39:52", "iter": 81, "name": "gomp_affinity_0_15", "value": 2.754, "decision": "revert"}
+{"ts": "2026-08-16T03:40:29", "iter": 82, "name": "full_attn_simd", "value": 2.664, "decision": "keep_quality_neutral", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "q/k rmsnorm + score + value-accumulate AVX512. Tokens match. Short-seq n=8 no win; helps longer context."}
+{"ts": "2026-08-16T03:43:30", "iter": 83, "name": "taskset_0_15", "value": 2.549, "decision": "revert"}
+{"ts": "2026-08-16T03:43:30", "iter": 84, "name": "gdn_omp0_first", "value": 2.989, "decision": "suspect_n2"}
+{"ts": "2026-08-16T03:43:30", "iter": 85, "name": "thp_status", "decision": "note", "notes": "THP [always] madvise never"}
+{"ts": "2026-08-16T03:43:30", "iter": 86, "name": "omp15", "value": 2.359, "decision": "revert"}
+{"ts": "2026-08-16T03:43:30", "iter": 87, "name": "omp17", "value": 2.838, "decision": "suspect_n2"}
+{"ts": "2026-08-16T03:43:30", "iter": 88, "name": "gdn_omp0_confirm", "value": 2.861, "decision": "revert", "notes": "n=8 4.662 vs GDN_OMP=1 n=8 4.636. Higher decode-only from slower n=2."}
+{"ts": "2026-08-16T03:43:30", "iter": 89, "name": "gdn_omp1_confirm", "value": 2.787, "decision": "keep", "notes": "n=8 slightly better; keep GDN_OMP=1"}
+{"ts": "2026-08-16T03:45:19", "iter": 90, "name": "flto_auto", "value": 2.452, "decision": "revert"}
+{"ts": "2026-08-16T03:45:19", "iter": 91, "name": "no_semantic_interposition", "value": 2.459, "decision": "revert"}
+{"ts": "2026-08-16T03:45:19", "iter": 92, "name": "whole_program", "value": 2.494, "decision": "revert"}
+{"ts": "2026-08-16T03:45:19", "iter": 93, "name": "omp_max_active_1", "value": 2.665, "decision": "revert"}
+{"ts": "2026-08-16T03:48:13", "iter": 94, "name": "no_stack_protector", "value": 2.582, "decision": "revert"}
+{"ts": "2026-08-16T03:48:13", "iter": 95, "name": "gc_sections_first", "value": 3.228, "decision": "suspect_n2"}
+{"ts": "2026-08-16T03:48:13", "iter": 96, "name": "nice0", "value": 2.555, "decision": "revert"}
+{"ts": "2026-08-16T03:48:13", "iter": 97, "name": "omp_cancellation_false", "value": 2.46, "decision": "revert"}
+{"ts": "2026-08-16T03:48:13", "iter": 98, "name": "gc_sections_confirm", "value": 2.719, "decision": "revert", "notes": "n=8 4.699; 3.228 was n=2 artifact"}
+{"ts": "2026-08-16T03:48:13", "iter": 99, "name": "default_reconfirm3", "value": 2.835, "decision": "note", "notes": "n=8 4.722; decode-only high because n=2 2.605 slow. Machine thermal/variance."}
+{"ts": "2026-08-16T03:49:24", "iter": 100, "name": "final_default", "value": 2.542, "decision": "stop_cap", "tokens": [17, 15, 17, 15, 95859, 17, 15, 17], "notes": "100-iter cap. n=8 4.742s. Tokens match. Best keep remains I06 2.792."}

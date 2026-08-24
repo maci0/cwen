@@ -1,0 +1,12 @@
+# ThreadSanitizer suppressions for the OpenMP runtime's own internals.
+# clang's libomp reports internal suspend/resume mutex traffic under TSan;
+# these silence the runtime, never our code. Anything reported outside
+# libomp source files is a real finding and must fail the gate.
+race:z_Linux_util.cpp
+race:kmp_runtime.cpp
+race:kmp_barrier.cpp
+race:kmp_sched.cpp
+race:kmp_lock.cpp
+race:kmp_alloc.cpp
+race:z_Reduction.cpp
+race:ompt-general.cpp
