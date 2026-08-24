@@ -4,7 +4,7 @@
 
 **Pure-C inference for Qwen3.8-27B on the CPU you already own.**
 
-mmap Q4 GGUF · AVX2/AVX-512 kernels · GatedDeltaNet hybrid · DFlash2 speculative decoding · single 4.7k-line `run.c`
+mmap Q4 GGUF · AVX2/AVX-512 kernels · GatedDeltaNet hybrid · DFlash2 speculative decoding · single-file `run.c`
 
 `make` · `./run model.gguf prompt.ids 96 -d 8` · lossless
 
@@ -42,8 +42,9 @@ heap repacking at load, and every knob failing loudly instead of silently.
 - **Long context** - runtime context window to 32k (`CWEN_CTX`) and opt-in
   YaRN rope scaling (`CWEN_ROPE_YARN`).
 - **Verification culture** - gemv goldens vs numpy, e2e residual compares vs
-  llama.cpp-pinned chains, loader fuzzing, microbenchmarks, and an
-  interleaved A/B suite proving speculation never changes output.
+  a numpy reference, a pinned decode-chain gate, loader fuzzing,
+  microbenchmarks, and an interleaved A/B suite proving speculation never
+  changes output.
 
 ## Quick start
 
@@ -57,6 +58,22 @@ make                # AVX2 build; add AVX512=1 on Zen 4/5
 ./run model/Qwen3.8-27B-Q4_0.gguf prompt.ids 64
 ```
 
+### CWENR weight sidecar
+
+The GGUF stores per-block scales inline; the **CWENR sidecar** repacks Q4_0
+offline into layouts the kernels like: pure-nibble streams with a separate
+f16 scale channel (`RS`), and gate/up + k/v matrices interleaved so one pass
+produces two outputs per weight stream (`RSI`).
+
+```bash
+make repack        # -> model/<name>.cwenr next to the GGUF (auto-mmap)
+```
+
+Same tokens, same API - detection is automatic, `CWEN_REPACK=FILE` overrides,
+and a missing sidecar falls back to plain GGUF. Measured same-window A/B on
+this box: decode ~x1.06 (2.06 vs 1.94 tok/s), ready-to-serve 0.7 s vs 3.6 s,
+resident RAM ~12.7 GiB vs 15+ (GGUF pages dropped after rebind).
+
 ### Speculative decoding
 
 ```bash
@@ -64,12 +81,14 @@ make                # AVX2 build; add AVX512=1 on Zen 4/5
 CWEN_SPEC=1 ./run model.gguf prompt.ids 256 -d 8
 
 # trained DFlash2 drafter (~2 GiB sidecar, one-time pack)
-.venv/bin/python tools/pack_dflash.py        # downloads + packs -> model/dflash2.spec
+# fetch incoai/Qwen3.8-27B-DFlash2 with any HF client; the packer defaults
+# to the HF-cache snapshot (pass a path if you keep it elsewhere)
+.venv/bin/python tools/pack_dflash.py        # packs it -> model/dflash2.spec
 CWEN_DFLASH=model/dflash2.spec ./run model.gguf prompt.ids 256 -d 8
 
 # persistent n-gram map + long context
 CWEN_SPEC=1 CWEN_NGRAM_CACHE=ngc.bin CWEN_CTX=16384 \
-  CWEN_ROPE_YARN=8192,4 ./run model.ggug prompt.ids 512 -d 8
+  CWEN_ROPE_YARN=8192,4 ./run model.gguf prompt.ids 512 -d 8
 ```
 
 Drafted blocks are verified in one sweep; accepted prefixes are exact target
@@ -87,7 +106,7 @@ Measured on Zen 5 (9950X, one CCD), AVX-512, shared-box conditions:
 | Verify-block ceiling (B=8) | 3.91x vs serial forwards |
 
 Acceptance is precision-sensitive: drafter weights want **Q8_0 or better**
-(Q4_0 acceptance measured at zero; presets via `pack_dflash.py --prec`).
+(Q4_0 acceptance measured at zero).
 Full numbers and methodology: [docs/DESIGN.md](docs/DESIGN.md),
 "Speculative decoding landscape".
 
@@ -111,11 +130,12 @@ Weights, sidecars, goldens and outputs are generated at runtime and gitignored.
 
 ```bash
 make verify        # gemv goldens vs the model on disk
+make verify-reproducible   # rebuild-and-compare: byte-identical binary across path/locale/TZ
 make verify-e2e    # 4-layer residual compare vs numpy reference
 make bench-spec    # speculation microbench: batched GEMV, rollback, block sweep
 .venv/bin/python tools/spec_e2e.py --quick   # plain-vs-spec stream equality suite
-make fuzz-run      # libFuzzer + ASan over both binary loaders
-make lint          # cppcheck + shellcheck + ruff
+make fuzz-run      # libFuzzer + ASan over GGUF/CWENR/.spec/frame parsers
+make lint          # cppcheck + shellcheck + ruff + mypy
 ```
 
 The durable gate (`tools/test_speed_gates.sh`) pins the decode chain so

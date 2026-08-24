@@ -54,4 +54,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        # reader closed the pipe early (`| head`): die quietly instead of
+        # tracebacking; devnull keeps the interpreter's shutdown flush silent
+        import os
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        raise SystemExit(1) from None

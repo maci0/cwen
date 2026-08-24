@@ -23,7 +23,7 @@ v2: packed 20B {qs[16], f32 d}
 
 Usage:
   .venv/bin/python tools/repack_q4.py model/Qwen3.8-27B-Q4_0.gguf
-  .venv/bin/python tools/repack_q4.py model/Qwen3.8-27B-Q4_0.gguf --version 3
+  .venv/bin/python tools/repack_q4.py model/Qwen3.8-27B-Q4_0.gguf --sidecar-version 3
 """
 
 from __future__ import annotations
@@ -249,7 +249,7 @@ def main() -> int:
             f.write(struct.pack("<IIQ", ver, len(entries), data_base))
             f.write(struct.pack("<II", STAMP_TAG, src_pages))
             for ent in entries:
-                name, ne0, ne1, a, b, flags = ent[0], ent[1], ent[2], ent[3], ent[4], ent[5]
+                name, ne0, ne1, a, b, flags = ent[:6]
                 nb = name.encode("utf-8")
                 if len(nb) >= 96:
                     raise ValueError(name)
@@ -265,18 +265,7 @@ def main() -> int:
                 f.write(b"\0" * pad)
 
             for i, ent in enumerate(entries):
-                name, ne0, ne1, a, b, flags, pl, _is_b, qs_nb, sc_nb = (
-                    ent[0],
-                    ent[1],
-                    ent[2],
-                    ent[3],
-                    ent[4],
-                    ent[5],
-                    ent[6],
-                    ent[7],
-                    ent[8],
-                    ent[9],
-                )
+                name, ne0, ne1, a, b, flags, pl, _is_b, qs_nb, sc_nb = ent
                 if ver == 2:
                     target = data_base + a
                     if f.tell() < target:
@@ -286,17 +275,12 @@ def main() -> int:
                     f.write(blob)
                 elif flags == F_IL_B:
                     pass  # payload already written by IL_A
-                elif flags == F_IL_A:
-                    qs, sc = pack_v4_pair(pl["ta"].data, pl["tb"].data, ne0, ne1)
-                    assert len(qs) == qs_nb and len(sc) == sc_nb
-                    for blob, doff in ((qs, a), (sc, b)):
-                        target = data_base + doff
-                        if f.tell() < target:
-                            f.write(b"\0" * (target - f.tell()))
-                        f.write(blob)
                 else:
-                    t = pl["t"] if pl["kind"] == "solo" else pl["ta"]
-                    qs, sc = pack_v3_tensor(t.data, ne0, ne1)
+                    if flags == F_IL_A:
+                        qs, sc = pack_v4_pair(pl["ta"].data, pl["tb"].data, ne0, ne1)
+                    else:
+                        t = pl["t"] if pl["kind"] == "solo" else pl["ta"]
+                        qs, sc = pack_v3_tensor(t.data, ne0, ne1)
                     assert len(qs) == qs_nb and len(sc) == sc_nb
                     for blob, doff in ((qs, a), (sc, b)):
                         target = data_base + doff

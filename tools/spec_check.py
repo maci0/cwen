@@ -43,7 +43,7 @@ def build_prompt_ids(repeats: int) -> list[int]:
 
 def write_repetitive_prompt(path: Path, repeats: int) -> None:
     ids = build_prompt_ids(repeats)
-    path.write_bytes(struct.pack(f"{len(ids)}i", *ids))
+    path.write_bytes(struct.pack(f"<{len(ids)}i", *ids))
 
 
 def run_once(
@@ -82,6 +82,12 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=8, help="prompt repetition count")
     ap.add_argument("--n-predict", type=int, default=48, help="tokens to generate per mode")
     args = ap.parse_args()
+
+    # Fail fast, before the prompt write: a missing binary must not leave a
+    # freshly rewritten prompt file behind as a side effect.
+    if not args.run.is_file():
+        print(f"spec_check: missing run binary {args.run} (build it with 'make')", file=sys.stderr)
+        return 1
 
     write_repetitive_prompt(args.prompt, args.repeats)
     print(f"prompt: {args.prompt} ({args.repeats}x repeated text)")

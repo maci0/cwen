@@ -145,7 +145,7 @@ def tok_s(bin_path: Path, omp: int) -> float:
     """decode-only via wall(n=8)-wall(n=2)."""
     prompt = ROOT / "prompt1.ids"
     if not prompt.exists():
-        prompt.write_bytes(struct.pack("i", 248044))
+        prompt.write_bytes(struct.pack("<i", 248044))
     env = os.environ.copy()
     env.update(
         {
@@ -195,6 +195,11 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma names to run")
     args = ap.parse_args()
     only = {x.strip() for x in args.only.split(",") if x.strip()}
+    known = {name for name, _ in IDEAS}
+    unknown = sorted(only - known)
+    if unknown:
+        print(f"unknown idea(s) {', '.join(unknown)}; have {sorted(known)}", file=sys.stderr)
+        return 2
 
     results: list[dict[str, Any]] = []
     print(f"idea_bench  trials={args.trials} iters={args.iters} omp={args.omp}", flush=True)

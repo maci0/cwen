@@ -2,6 +2,37 @@
 
 Lab notebook for the Qwen3.8-27B decode-throughput loop.
 
+## 2026-08-24: drafter paired split-Q8 (.spec v2)
+
+- `.spec` container version bumped 1 -> 2: the packer now emits split-Q8
+  tensor types (3=Q8S single matrix, 4=Q8SI two matrices paired row-wise) so
+  `df_layer` streams each weight once per verify block instead of running two
+  gemv passes (k/v land in one `attn_kv`, gate/up in one `mlp_gu`). Engines
+  built before this change reject v2 files with `dflash: unsupported version`
+  (previously they would have failed per-tensor with
+  `unknown tensor type`); the loader still reads every v1 file unchanged, and
+  re-packing with the new `tools/pack_dflash.py` is the only migration step.
+- **Removed** `pack_dflash.py --prec q8|mixed|q4`: q8 was the only preset
+  that produced a usable drafter (measured acceptance: mixed 0.33, q4 0.00),
+  so the flag only made broken containers. Scripts invoking the packer must
+  drop the flag; output precision is now always split/paired Q8.
+- Removed `tools/dflash_ref.py` (numpy reference for drafter dumps; no longer
+  referenced by any gate).
+
+## 2026-08-24: spec context-cap room gate + cache-load hardening
+
+- Speculative decode no longer emits the bonus token when a full-accept block
+  lands flush at the `CWEN_CTX` cap: serial decode never emits without a free
+  slot, so spec could previously return one token more than the window held.
+  Token streams are otherwise unchanged.
+- `ng_load` (NGC2 cache) now rejects out-of-vocab key ids while reading, so a
+  corrupt or foreign cache file cannot plant entries that never match but
+  survive every future save.
+- New reproducible-build gate: `make verify-reproducible`
+  (`tools/check_reproducible.sh`) rebuilds ./run in a second build dir under
+  different path/locale/TZ/SOURCE_DATE_EPOCH and requires byte-identical
+  binaries.
+
 ## 2026-08-24: context-cap truncation signal
 
 - Both decode drivers (serial and speculative) used to stop silently when the

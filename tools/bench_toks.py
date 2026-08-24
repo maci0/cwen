@@ -78,7 +78,7 @@ def main() -> int:
     model = root / args.model
     prompt = root / args.prompt
     if not prompt.exists():
-        prompt.write_bytes(struct.pack("i", 248044))
+        prompt.write_bytes(struct.pack("<i", 248044))
 
     env = os.environ.copy()
     env.update(
@@ -89,7 +89,12 @@ def main() -> int:
             "OMP_DYNAMIC": "false",
         }
     )
-    ns = [int(x) for x in args.ns.split(",") if x.strip()]
+    try:
+        ns = [int(x) for x in args.ns.split(",") if x.strip()]
+    except ValueError:
+        ap.error(f"--ns must be a comma list of integers, got '{args.ns}'")
+    if not ns:
+        ap.error("--ns must name at least one n_predict value")
     print(
         f"tok/s bench  OMP={args.omp} trials={args.trials} ns={ns}",
         flush=True,

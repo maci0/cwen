@@ -9,7 +9,7 @@
 | Host | AMD Ryzen 9 9950X (16c/32t, AVX-512 + VNNI) |
 | Weights | `model/Qwen3.8-27B-Q4_0.gguf` (16056478688 B, GGUF v3, `qwen35`) |
 | Max iterations | 100 (**reached**) |
-| Bench | `AVX512=1 OMP=16 ./autoresearch.sh` → `tools/bench_toks.py --ns 2,8 --trials 3` |
+| Bench | `AVX512=1 OMP=16 tools/autoresearch.sh` → `tools/bench_toks.py --ns 2,8 --trials 3` |
 
 Hard rules: AGENTS.md fusion style (no `gemv2`/`gemv3`). Keep a change only if tok/s rises **and** the token chain is unchanged (or a documented MTP path that still verifies against the base argmax).
 

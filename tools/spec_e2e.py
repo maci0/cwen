@@ -232,7 +232,10 @@ class Server:
         try:
             if self.proc.stdin:
                 self.proc.stdin.close()
-        except BrokenPipeError:
+        except OSError:
+            # BrokenPipeError (engine already gone) is the usual case, but no
+            # close error may skip the reap below: this method is the only
+            # teardown for a resident engine holding the model in RAM.
             pass
         # a wedged engine (timed-out frame) gets no long grace period; the
         # real engine exits promptly on EOF, so healthy shutdown keeps 60 s
@@ -296,8 +299,18 @@ def main() -> int:
                 results[(label, name)] = servers[label].frame(corpus[name][0], n_gen)
                 print(f"[{label}] {name}: done ({results[(label, name)][1]:.1f}s)", flush=True)
     finally:
+        # Teardown every engine even when one close fails: a wedged engine
+        # (survives SIGKILL, so wait() raises) must not strand its siblings,
+        # each holding the whole model in RAM.
+        close_errs: list[tuple[str, BaseException]] = []
         for lbl, srv in servers.items():
-            tails[lbl] = srv.close()
+            try:
+                tails[lbl] = srv.close()
+            except Exception as e:
+                close_errs.append((lbl, e))
+                print(f"[{lbl}] teardown failed: {e!r}", file=sys.stderr, flush=True)
+        if close_errs:
+            raise close_errs[0][1]
 
     fails = 0
     hdr = f"{'case':<12} {'plain s':>9} {'d8 s':>9} {'d8 x':>6} {'d3 s':>9} {'d3 x':>6}  gates"

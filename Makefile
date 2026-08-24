@@ -22,6 +22,17 @@ ifeq ($(AVX512),1)
   CFLAGS += -mavx512f -mavx512bw -mavx512vl -mavx512dq -mavx512vnni -march=native -DCWEN_AVX512
 endif
 
+# Diagnostics raised after the tree proved clean under -Werror on gcc across
+# all build configs (default, AVX512=1, bench targets). Portable classes stay
+# unguarded so clang builds pick them up too; GCC-only classes are guarded to
+# keep unknown-warning-option from tripping -Werror under `make CC=clang`.
+CFLAGS += -Wcast-qual -Wformat=2 -Wdate-time
+ifeq ($(findstring clang,$(shell $(CC) --version)),)
+CFLAGS += -Wlogical-op -Wduplicated-cond -Wduplicated-branches \
+          -Wjump-misses-init -Walloc-zero -Warith-conversion \
+          -Warray-bounds=2 -Wuse-after-free=3
+endif
+
 # Profiling build used by tools/profile_flames.sh and tools/profile_lowlevel.sh:
 # debug info + frame pointers for perf stacks, always the AVX512 path.
 PROF_CFLAGS  = -O3 -std=c11 -g -fno-omit-frame-pointer -Werror -fopenmp \
@@ -49,7 +60,7 @@ FORCE:
 
 .DEFAULT_GOAL := all
 
-.PHONY: all help setup lock pycheck clean check-loc lint gate golden verify verify-tsan e2e verify-e2e e2e-full-c e2e-full-py verify-e2e-full ga bench-toks bench-spec idea-bench repack fuzz-seeds fuzz-run buildinfo
+.PHONY: all help setup lock pycheck clean check-loc lint gate golden verify verify-tsan verify-reproducible e2e verify-e2e e2e-full-c e2e-full-py verify-e2e-full ga bench-toks bench-spec idea-bench repack fuzz-seeds fuzz-run buildinfo bench-q4_gemv run_prof fuzz
 
 all: run
 
@@ -61,6 +72,7 @@ help:
 	@echo "  make              build ./run; add AVX512=1 for Zen4/5 peak"
 	@echo "  make verify       gemv goldens vs $(MODEL) (fast correctness loop)"
 	@echo "  make verify-tsan  gemv goldens under ThreadSanitizer (needs clang)"
+	@echo "  make verify-reproducible  rebuild-and-compare: bit-identical ./run across path/locale/TZ"
 	@echo "  make gate         full gate: goldens + pinned decode chain (tools/test_speed_gates.sh)"
 	@echo "  make golden       regenerate the goldens verify checks (after weight change)"
 	@echo "  make bench-q4_gemv build the gemv bench alone"
@@ -129,9 +141,9 @@ check-loc:
 # + ruff (lint + format check) + mypy. All must stay green.
 # shellcheck/cppcheck/mypy are system packages; ruff comes from requirements.txt via make setup.
 lint: | pycheck
-	@shellcheck -S style tools/autoresearch.sh tools/*.sh
-	@cppcheck -q --enable=warning,performance,portability --std=c11 \
-	  --platform=unix64 --error-exitcode=1 run.c tools/fuzz_loader.c
+	@shellcheck -S style tools/*.sh
+	@cppcheck -q --enable=warning,performance,portability --check-level=exhaustive \
+	  --std=c11 --platform=unix64 --error-exitcode=1 run.c tools/fuzz_loader.c
 	@$(PY) -m ruff check tools/
 	@$(PY) -m ruff format --check tools/
 	@mypy
@@ -141,7 +153,8 @@ clean:
 	rm -f run bench_q4_gemv bench_spec fuzz_loader run_prof bench_q4_gemv_tsan \
 	  $(BUILD_STAMP) $(BUILD_STAMP_PROF)
 
-# libFuzzer harness for the binary loaders (GGUF + CWENR sidecar); needs clang.
+# libFuzzer harness for every binary parser surface (GGUF, CWENR sidecar,
+# DFlash .spec, request frames, NGC2 cache round trip); needs clang.
 FUZZ_CC  ?= clang
 FUZZ_OUT ?= fuzz_out
 fuzz: run.c tools/fuzz_loader.c cwen_tune.h
@@ -217,12 +230,17 @@ verify-tsan: bench-q4_gemv_tsan
 	fi
 	@echo "gemv goldens OK (tsan)"
 
+# Independent rebuild-and-compare gate: same source, different build dir,
+# locale, TZ, and SOURCE_DATE_EPOCH must produce a byte-identical ./run.
+verify-reproducible:
+	tools/check_reproducible.sh
+
 # Durable speed+correctness gate (AVX512): gemv goldens + pinned argmax chain
 # + run-to-run determinism. Builds its own binaries; logs under outputs/gates/.
 gate:
 	tools/test_speed_gates.sh outputs/gates
 
-# GA + symbolic thr: tools/ga_evolve.py writes cwen_tune.h
+# GA + symbolic tune: tools/ga_evolve.py writes cwen_tune.h
 ga: | pycheck
 	$(PY) tools/ga_evolve.py --gens 6 --pop 12 --iters 5 --trials 1 --avx512
 

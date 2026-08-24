@@ -11,4 +11,4 @@ from pathlib import Path
 BOS = 248044
 
 path = Path(__file__).resolve().parents[1] / "prompt1.ids"
-path.write_bytes(struct.pack("i", BOS))
+path.write_bytes(struct.pack("<i", BOS))

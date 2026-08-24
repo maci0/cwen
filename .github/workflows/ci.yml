@@ -19,11 +19,19 @@ jobs:
       - name: install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
-          python-version: "3.13"
+          # Pinned like mypy below: without this the action floats to latest,
+          # letting CI resolve requirements.lock with a different resolver than
+          # contributor machines. Bump together with local `uv --version`.
+          version: "0.12.3"
+          # No python-version here on purpose: uv discovers .python-version
+          # (3.13) from the checkout, keeping that file the single source of
+          # truth for the interpreter instead of a second literal in CI YAML.
 
-      # Needs uv on PATH from the step above.
+      # Needs uv on PATH from the step above. Pinned to the version local dev
+      # documents its mypy ratchet against (pyproject.toml); a floating latest
+      # here would let CI and contributor machines disagree on the gate.
       - name: install uv tool (mypy)
-        run: uv tool install mypy
+        run: uv tool install mypy==2.1.0
 
       # Same entry point as local dev: hash-checked requirements.lock, so CI
       # cannot drift from what contributors install via `make setup`.
@@ -42,6 +50,9 @@ jobs:
 
       - name: smoke (help + usage paths)
         run: |
+          # The two bench binaries are not part of the default build; build
+          # them here so their --help paths are exercised as intended.
+          make bench-q4_gemv bench-spec
           ./run --help > /dev/null
           ./bench_q4_gemv --help > /dev/null
           ./bench_spec --help > /dev/null

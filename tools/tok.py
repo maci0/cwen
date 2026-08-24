@@ -33,7 +33,15 @@ def main() -> int:
         print("transformers not installed; run 'make setup'", file=sys.stderr)
         return 1
 
-    tok = AutoTokenizer.from_pretrained(args.model)
+    try:
+        tok = AutoTokenizer.from_pretrained(args.model)
+    except OSError as e:
+        print(
+            f"tok: cannot load tokenizer from '{args.model}': {e} "
+            "(need a local tokenizer dir like model/ or a hub id)",
+            file=sys.stderr,
+        )
+        return 1
     if args.chat:
         messages = [{"role": "user", "content": args.text}]
         text = tok.apply_chat_template(
@@ -43,7 +51,9 @@ def main() -> int:
     else:
         ids = tok.encode(args.text, add_special_tokens=True)
 
-    Path(args.out).write_bytes(struct.pack(f"{len(ids)}i", *ids))
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(struct.pack(f"<{len(ids)}i", *ids))
     print(f"wrote {len(ids)} tokens -> {args.out}")
     print(ids[:32], ("..." if len(ids) > 32 else ""))
     return 0

@@ -1848,7 +1848,7 @@ static void warm_live_gguf_tensors(void) {
       /* qs is in cwenr; already rebound off Gmap */
       continue;
     }
-    touch_span((void*)p, nb, 4096);
+    touch_span(p, nb, 4096);
     n+=nb;
   }
   fprintf(stderr,"gguf: warm live tensors %zu MiB\n",n>>20);

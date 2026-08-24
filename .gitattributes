@@ -1,0 +1,13 @@
+# Linux-only repo: text files are LF everywhere, on every platform's checkout.
+# CRLF in the working tree is never wanted here: it breaks make recipes and
+# every tools/*.sh shebang line.
+* text=auto eol=lf
+
+# Generated binary formats (model artifacts, id blobs, bytecode): never
+# normalize or diff these, even if one gets committed by accident.
+*.gguf binary
+*.cwenr binary
+*.spec binary
+*.ids binary
+*.bin binary
+*.pyc binary

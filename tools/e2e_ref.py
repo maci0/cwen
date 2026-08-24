@@ -250,7 +250,7 @@ def main() -> int:
 
     if args.prompt_ids:
         raw = args.prompt_ids.read_bytes()
-        prompt = list(struct.unpack(f"{len(raw) // 4}i", raw))
+        prompt = list(struct.unpack(f"<{len(raw) // 4}i", raw))
     else:
         prompt = [args.token]
 
