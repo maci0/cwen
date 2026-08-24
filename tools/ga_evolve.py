@@ -587,8 +587,12 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=1, help="trials per kernel during evolve")
     ap.add_argument("--mutate", type=float, default=0.35)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--avx512", action=argparse.BooleanOptionalAction, default=True,
-                    help="compile kernels with -mavx512 (Zen4/5 peak); --no-avx512 to disable")
+    ap.add_argument(
+        "--avx512",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="compile kernels with -mavx512 (Zen4/5 peak); --no-avx512 to disable",
+    )
     ap.add_argument("--apply-best", action="store_true")
     ap.add_argument("--smoke", action="store_true", help="tiny run: pop=4 gens=2")
     args = ap.parse_args()

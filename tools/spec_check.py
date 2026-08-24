@@ -73,10 +73,12 @@ def main() -> int:
         description="Greedy-lossless check for CWEN_SPEC block speculation."
     )
     ap.add_argument("--run", type=Path, default=Path("./run"), help="path to the run binary")
-    ap.add_argument("--model", type=Path, default=Path("model/Qwen3.8-27B-Q4_0.gguf"),
-                    help="GGUF model path")
-    ap.add_argument("--prompt", type=Path, default=Path("spec_check.ids"),
-                    help="prompt ids file to write")
+    ap.add_argument(
+        "--model", type=Path, default=Path("model/Qwen3.8-27B-Q4_0.gguf"), help="GGUF model path"
+    )
+    ap.add_argument(
+        "--prompt", type=Path, default=Path("spec_check.ids"), help="prompt ids file to write"
+    )
     ap.add_argument("--repeats", type=int, default=8, help="prompt repetition count")
     ap.add_argument("--n-predict", type=int, default=48, help="tokens to generate per mode")
     args = ap.parse_args()

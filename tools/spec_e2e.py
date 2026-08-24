@@ -255,8 +255,9 @@ def main() -> int:
         description="A/B CWEN_SPEC block drafting vs plain decode over the prompt corpus."
     )
     ap.add_argument("--run", type=Path, default=Path("./run"), help="path to the run binary")
-    ap.add_argument("--model", type=Path, default=Path("model/Qwen3.8-27B-Q4_0.gguf"),
-                    help="GGUF model path")
+    ap.add_argument(
+        "--model", type=Path, default=Path("model/Qwen3.8-27B-Q4_0.gguf"), help="GGUF model path"
+    )
     ap.add_argument(
         "--n-gen", type=int, default=None, help="tokens per case (default 48, or 24 with --quick)"
     )

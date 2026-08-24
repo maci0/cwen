@@ -41,8 +41,9 @@ def main() -> int:
         description="Sweep CWEN_SPEC drafting knobs over the workload corpus."
     )
     ap.add_argument("--run", type=str, default="./run", help="path to the run binary")
-    ap.add_argument("--model", type=str, default="model/Qwen3.8-27B-Q4_0.gguf",
-                    help="GGUF model path")
+    ap.add_argument(
+        "--model", type=str, default="model/Qwen3.8-27B-Q4_0.gguf", help="GGUF model path"
+    )
     ap.add_argument(
         "--workloads",
         type=str,
@@ -52,8 +53,7 @@ def main() -> int:
     ap.add_argument(
         "--n-gen", type=int, default=None, help="timed tokens (default 48, or 32 with --quick)"
     )
-    ap.add_argument("--quick", action="store_true",
-                    help="one rep per arm and shorter generations")
+    ap.add_argument("--quick", action="store_true", help="one rep per arm and shorter generations")
     args = ap.parse_args()
     n_gen = args.n_gen or (32 if args.quick else 48)
     reps = 1 if args.quick else 2

@@ -13,8 +13,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Encode text to an int32 token-id blob for ./run.")
     ap.add_argument("text", nargs="?", default="Hello", help="text to encode")
     ap.add_argument("-o", "--out", default="prompt.ids", help="output int32 blob path")
-    ap.add_argument("--model", default="model",
-                    help="tokenizer source: local dir or hub id (default: model/)")
+    ap.add_argument(
+        "--model", default="model", help="tokenizer source: local dir or hub id (default: model/)"
+    )
     ap.add_argument("--chat", action="store_true", help="wrap as user chat turn")
     args = ap.parse_args()
 

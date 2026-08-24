@@ -157,10 +157,20 @@ def build_plan(q4: list, ver: int) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Offline Q4_0 → CWENR")
     ap.add_argument("gguf", type=Path, help="source GGUF with Q4_0 tensors")
-    ap.add_argument("-o", "--out", type=Path, default=None,
-                    help="sidecar path (default: GGUF path with .cwenr suffix)")
-    ap.add_argument("--sidecar-version", type=int, choices=(2, 3, 4), default=4,
-                    help="CWENR sidecar format version to write")
+    ap.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        default=None,
+        help="sidecar path (default: GGUF path with .cwenr suffix)",
+    )
+    ap.add_argument(
+        "--sidecar-version",
+        type=int,
+        choices=(2, 3, 4),
+        default=4,
+        help="CWENR sidecar format version to write",
+    )
     ap.add_argument("--dry-run", action="store_true", help="print the layout plan, write nothing")
     args = ap.parse_args()
     if not args.gguf.is_file():
