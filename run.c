@@ -2502,7 +2502,10 @@ static int argmax_of(const float *lg) {
     }
   }
 #endif
-  for(;i<V;i++) if(lg[i]>bv){bv=lg[i];bi=i;}
+  /* pointer walk: gcc13+flto misproves the indexed form as OOB once this
+     inlines into the speculative driver (heap rows of Blogits) */
+  { const float *p=lg+i,*pe=lg+V;
+    for(;p<pe;p++,i++){ if(*p>bv){bv=*p;bi=i;} } }
   return bi;
 }
 static int argmax_logits(void){ return argmax_of(logits); }
