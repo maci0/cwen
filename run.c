@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <assert.h>
 #include <time.h>
+#include <errno.h>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -1281,14 +1282,16 @@ static int matmul_type_ok(int ty) {
     default: return 0;
   }
 }
+/* prefetch control (runtime knobs: CWEN_RESIDENCY, CWEN_PF_T0, CWEN_NO_PF) */
+static int g_no_pf;      /* disable weight prefetch entirely */
+static int g_pf_t0;      /* use T0 (all levels) instead of NTA */
+static int g_pipe_pf;    /* prefetch next layer's first weights */
+static int g_residency;  /* THP+mlock+prefault memory hygiene */
+
 static inline void cwen_pf_w(const void *p) {
-#if !CWEN_IDEA_NO_PF
-#if CWEN_IDEA_PF_T0
-  __builtin_prefetch(p,0,3);
-#else
-  __builtin_prefetch(p,0,0); /* NTA */
-#endif
-#endif
+  if(g_no_pf) return;
+  if(g_pf_t0) __builtin_prefetch(p,0,3);
+  else __builtin_prefetch(p,0,0); /* NTA */
 }
 
 /* Row kernel: static inline so fused call sites can be one OMP loop + inlined bodies.
@@ -2500,11 +2503,12 @@ static void forward_ex(int token, int need_logits) {
 #if CWEN_IDEA_MADVISE
     if(l+1<L) madvise_layer(l+1);
 #endif
-#if CWEN_IDEA_PIPE_PF
-    if(l+1<L){ const Tensor *t=W[l+1].is_linear?&W[l+1].qkv:&W[l+1].wq;
-      size_t n=row_bytes(t->type,t->ne0)*(size_t)t->ne1; if(n>(8u<<20)) n=8u<<20;
-      touch_span(t->data,n,4096); }
-#endif
+    if(g_pipe_pf&&l+1<L){
+      const Tensor *t=W[l+1].is_linear?&W[l+1].qkv:&W[l+1].wq;
+      size_t n=row_bytes(t->type,t->ne0)*(size_t)t->ne1; if(n>(4u<<20)) n=4u<<20;
+      const char *pp2=(const char*)t->data;
+      for(size_t o=0;o<n;o+=4096) __builtin_prefetch(pp2+o,0,0);
+    }
     if (W[l].is_linear) layer_linear(l);
     else layer_full(l);
     /* DFlash2 tap capture: residual stream after the tap layers */
@@ -3799,6 +3803,40 @@ static void spec_config_init(void) {
   }
 }
 
+static void prefault(void *p,size_t len){
+  volatile char *c=(volatile char*)p;
+  for(size_t i=0;i<len;i+=4096) (void)c[i];
+}
+/* ---- memory residency (cachelm learnings applied to a large model) ----
+   Full 12.7 GiB never fits L3 (32 MiB CCD). "Keeping attention layers in
+   cache" means keeping KV + activations hot while weights stream. What
+   transfers from small-model L3-residency work: THP on large arenas,
+   mlock weight mmap, next-layer software prefetch. */
+static void thp_hint(void *p,size_t len){
+#ifdef MADV_HUGEPAGE
+  madvise(p,len,MADV_HUGEPAGE);
+#else
+  (void)p;(void)len;
+#endif
+}
+static void residency_init(void){
+#ifdef MADV_HUGEPAGE
+  if(Kcache){size_t n=(size_t)L*g_ctx*NKV*HD*4;thp_hint(Kcache,n);prefault(Kcache,n);}
+  if(Vcache){size_t n=(size_t)L*g_ctx*NKV*HD*4;thp_hint(Vcache,n);prefault(Vcache,n);}
+  if(Srec){thp_hint(Srec,(size_t)L*LVH*LSD*LSD*4);}
+  if(Cstate){thp_hint(Cstate,(size_t)L*QKV_DIM*(CONV_K-1)*4);}
+#endif
+  if(Gmap&&Gmap_len){
+    if(mlock(Gmap,Gmap_len))
+      fprintf(stderr,"residency: mlock gguf failed (%s)\n",strerror(errno));
+    else fprintf(stderr,"residency: locked gguf %zu MiB\n",Gmap_len>>20);
+  }
+  if(Rmap&&Rmap_len){
+    if(mlock(Rmap,Rmap_len))
+      fprintf(stderr,"residency: mlock cwenr failed (%s)\n",strerror(errno));
+  }
+}
+
 /* Apply GA-evolved OpenMP defaults unless the environment already sets them.
    libgomp parses its ICVs in a shared-library constructor that runs before
    main(), so setenv() from inside the process never reaches them (probe:
@@ -4115,6 +4153,7 @@ int main(int argc,char **argv) {
   cwen_omp_init(argc,argv);
   spec_enabled=1; /* alloc_state must map the block scratch + snapshots */
   load_model(model);
+  if(g_residency) residency_init();
   alloc_state();
   static const char *names[]={"blk.0.attn_qkv.weight","blk.0.ffn_gate.weight",
                               "blk.0.ffn_down.weight","blk.0.ssm_out.weight",
@@ -4780,6 +4819,7 @@ static void run_usage(FILE *out) {
     "  CWEN_CTX=N             context window, 64..32768 (default 4096)\n"
     "  CWEN_ROPE_YARN=o,f     YaRN long-context scaling: original max,\n"
     "                         factor [,beta_fast,beta_slow]; e.g. 8192,4\n"
+    "  CWEN_RESIDENCY=1       THP+mlock+prefault+next-layer PF\n"
     "  CWEN_NGRAM_CACHE=FILE  persist n-gram map across runs (needs CWEN_SPEC)\n"
     "  CWEN_SPEC=1            n-gram block speculation (greedy-lossless)\n"
     "  CWEN_DFLASH=FILE       trained DFlash2 drafter (.spec, see\n"
@@ -4826,6 +4866,14 @@ int main(int argc, char **argv) {
 
   cwen_omp_init(argc,argv); /* before load_model: CWENR v2 split forks an OMP team */
   spec_config_init();
+  { int v;
+    if(env_int("CWEN_RESIDENCY",&v)&&v){
+      g_residency=1; g_pipe_pf=1; g_pf_t0=1;
+    }
+    if(env_int("CWEN_PF_T0",&v)) g_pf_t0=v;
+    if(env_int("CWEN_NO_PF",&v)) g_no_pf=v;
+    if(env_int("CWEN_PIPE_PF",&v)) g_pipe_pf=v;
+  }
   rope_env_init();
   int server_mode=0;
   env_bool("CWEN_SERVER",&server_mode); /* fail fast before the model load */
@@ -4848,6 +4896,7 @@ int main(int argc, char **argv) {
   load_model(model);
   if(dflash_on) load_dflash(dfpath);
   alloc_state();
+  if(g_residency) residency_init();
   { const char *ngc=getenv("CWEN_NGRAM_CACHE");
     static char ngc_path[512];
     if(ngc&&ngc[0]&&spec_enabled&&!dflash_on){
