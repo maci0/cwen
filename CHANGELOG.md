@@ -47,7 +47,16 @@ Interactive flamegraph at docs/assets/flamegraph-dflash2.svg (32,695 samples).
 88% self-time in four dot kernels streaming weights at memory bandwidth.
 Comparison charts: acceptance by workload, layout A/B, block ceiling, precision.
 
-### PR18 MTP status
+### PR18 MTP status (in progress)
+Structural support complete: NextnW binding (15 tensors), nextn KV cache
+alloc/commit, autoregressive mtp_draft() wired into spec driver behind
+mtp_on flag (auto-detected from blk.64 tensor presence). Runs losslessly.
+Acceptance currently at zero — the nextn forward produces numerically
+incorrect hidden states. Root cause: likely head-dim mapping or gate
+application in the attention path. Requires the same numpy cross-check
+debugging approach used successfully for DFlash2 (bisect per-layer).
+
+
 Structural support added: NextnW struct, blk.64 tensor binding, nextn KV cache
 allocation. The autoregressive draft loop and driver wiring remain as follow-up
 work (~150 LOC estimated). The blk.64 layer mirrors a target full-attn layer

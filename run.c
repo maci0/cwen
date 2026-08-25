@@ -244,6 +244,22 @@ typedef struct {
 static DraftW DW[DL_LAYERS];
 static Tensor Dw_fc, Dw_hnorm, Dw_norm, Dw_pred, Dw_succ, Dw_hproj;
 static int dflash_on;
+
+/* ---- MTP nextn layer (PR18) ---- */
+typedef struct {
+  Tensor attn_norm, post_norm;
+  Tensor wq, wk, wv, wo;
+  Tensor q_norm, k_norm;
+  Tensor ffn_gate, ffn_up, ffn_down;
+  Tensor eh_proj;
+  Tensor enorm, hnorm;
+  Tensor shared_head_norm;
+} NextnW;
+static NextnW NW;
+static int mtp_on;
+static float __attribute__((unused)) *NKc, *NVc;
+static __attribute__((unused)) float NHcap[H];
+static int mtp_kv_len __attribute__((unused));
 static float *DTapSer, *DTapBlk;   /* tap captures: serial / per-block-row */
 static float *Dctx;                /* committed context vectors [MAX_SEQ*H] */
 static float *Dkc, *Dvc;           /* drafter KV caches [L][MAX_SEQ][KV] */
@@ -2999,7 +3015,127 @@ static int dflash_draft(const int *hist,int hn,int *out,int max_d){
   return E;
 }
 
-/* ---- GGUF load ---- */
+/* ---- MTP forward (PR18) ----
+   The nextn layer is a single full-attention decoder layer that takes the
+   concatenation of [rmsnorm(embed(token), enorm), rmsnorm(h_target, hnorm)]
+   projected via eh_proj, runs one transformer pass with causal attention
+   over its own KV cache, and produces a hidden state for lm_head. */
+
+
+/* capture target final hidden state after a committed token */
+static __attribute__((unused)) void mtp_capture_hidden(void){
+  memcpy(NHcap,xb,H*sizeof(float));
+}
+
+/* one autoregressive step through the nextn layer at position pos.
+   token_id = proposed input; h_target = captured final hidden from target.
+   Returns post-norm hidden state in out_h[H]. */
+static void mtp_step(int token_id,int pos,const float *h_target,float *out_h){
+  float att_l[MAX_SEQ];
+  static float emb_n[H],h_n[H],cat[2*H],xw[H],resid[H],ln[H];
+  static float qv[NH*HD*2],kvm[NKV*HD],ao[NH*HD];
+  static float ffg[I],ffu[I],ffd[H];
+
+  embed_token_to(token_id,emb_n);
+  rmsnorm(emb_n,emb_n,(const float*)NW.enorm.data,H);
+  rmsnorm(h_n,h_target,(const float*)NW.hnorm.data,H);
+  memcpy(cat,emb_n,H*sizeof(float));
+  memcpy(cat+H,h_n,H*sizeof(float));
+  gemv(&NW.eh_proj,cat,xw);
+
+  /* attention sublayer */
+  memcpy(resid,xw,H*sizeof(float));
+  rmsnorm(ln,xw,(const float*)NW.attn_norm.data,H);
+  gemv(&NW.wq,ln,qv);   /* NH*HD*2 output (query + gate) */
+  gemv(&NW.wk,ln,kvm);
+  gemv(&NW.wv,ln,kvm);
+
+  /* QK-norm per head */
+  for(int h=0;h<DL_NH;h++)
+    rmsnorm(qv+(size_t)h*DL_HD,qv+(size_t)h*DL_HD,
+            (const float*)NW.q_norm.data,DL_HD);
+  for(int h=0;h<NKV;h++)
+    rmsnorm(kvm+(size_t)h*DL_HD,kvm+(size_t)h*DL_HD,
+            (const float*)NW.k_norm.data,DL_HD);
+
+  /* RoPE at absolute position pos */
+  { const float *C=DRcos[pos],*S=DRsin[pos];
+    if(!DRdone[pos]){
+      for(int i=0;i<DL_HD/2;i++){
+        float fr=powf(DL_ROPE_THETA,(float)(2*i)/(float)DL_HD);
+        float ang=(float)pos*fr;
+        DRcos[pos][i]=cosf(ang); DRsin[pos][i]=sinf(ang);
+      }
+      DRdone[pos]=1;
+    }
+    for(int h=0;h<DL_NH;h++){ float *q=qv+(size_t)h*DL_HD;
+      for(int i=0;i<64;i++){float a=q[i],b=q[i+64];q[i]=a*C[i]-b*S[i];q[i+64]=a*S[i]+b*C[i];}}
+    for(int h=0;h<NKV;h++){ float *k=kvm+(size_t)h*DL_HD;
+      for(int i=0;i<64;i++){float a=k[i],b=k[i+64];k[i]=a*C[i]-b*S[i];k[i+64]=a*S[i]+b*C[i];}}
+  }
+
+  /* store K,V in nextn cache at slot pos */
+  memcpy(NKc+(size_t)pos*NKV*DL_HD,kvm,NKV*DL_HD*sizeof(float));
+  memcpy(NVc+(size_t)pos*NKV*DL_HD,kvm,NKV*DL_HD*sizeof(float));
+
+  /* causal GQA attention over NKc/NVc[0..pos] */
+  memset(ao,0,(size_t)DL_NH*DL_HD*sizeof(float));
+  { float scale=1.f/sqrtf((float)DL_HD);
+    int kv_mul=DL_NH/NKV;
+    for(int h=0;h<DL_NH;h++){
+      int hk=h/kv_mul;
+      const float *q=qv+(size_t)h*DL_HD;
+      float mx=-INFINITY,sum=0.f;
+      for(int t=0;t<=pos;t++){
+        const float *k=NKc+(size_t)t*NKV*DL_HD+(size_t)hk*DL_HD;
+        float s=dot_f32(q,k,DL_HD)*scale;
+        att_l[t]=s;if(s>mx)mx=s;
+      }
+      for(int t=0;t<=pos;t++){att_l[t]=expf(att_l[t]-mx);sum+=att_l[t];}
+      float inv=1.f/sum;
+      float *o=ao+(size_t)h*DL_HD;
+      memset(o,0,DL_HD*sizeof(float));
+      for(int t=0;t<=pos;t++){
+        const float *v=NKc+(size_t)t*NKV*DL_HD+NKV*DL_HD;
+        float a=att_l[t]*inv;
+        for(int i=0;i<DL_HD;i++) o[i]+=a*v[(size_t)hk*DL_HD+i];
+      }
+    }
+  }
+  /* o_proj + residual */
+  { float op[H]; gemv(&NW.wo,ao,op);
+    for(int i=0;i<H;i++) resid[i]+=op[i]; }
+  /* MLP */
+  rmsnorm(ln,resid,(const float*)NW.post_norm.data,H);
+  gemv(&NW.ffn_gate,ln,ffg);
+  gemv(&NW.ffn_up,ln,ffu);
+  silu_mul(ffg,ffu,I);
+  gemv(&NW.ffn_down,ffu,ffd);
+  for(int i=0;i<H;i++) resid[i]+=ffd[i];
+  /* shared head norm → output */
+  rmsnorm(out_h,resid,(const float*)NW.shared_head_norm.data,H);
+}
+
+/* autoregressive MTP drafting */
+static int mtp_draft(const int *hist,int hn,int *out,int max_d){
+  if(!mtp_on||hn<1||max_d<=0) return 0;
+  int room=g_ctx-1-(mtp_kv_len+1);
+  if(room<=0) return 0;
+  int n=max_d<room?max_d:room;
+  if(n<=0) return 0;
+  int prev=hist[hn-1];
+  static float cur_logits[V];
+  float cur_h[H];
+  int pos=mtp_kv_len;
+  for(int t=0;t<n;t++){
+    mtp_step(prev,pos,NHcap,cur_h);
+    rmsnorm(cur_logits,cur_h,(const float*)output_norm.data,H);
+    gemv(&output,cur_h,cur_logits);
+    out[t]=argmax_of(cur_logits);
+    prev=out[t]; pos++;
+  }
+  return n;
+}
 static const uint8_t *Gend; /* mapped-GGUF end; all cursor reads are bounds-checked */
 static uint64_t *G_offs;    /* tensor offsets (global so the fuzzer can free mid-parse) */
 static void gguf_bad(const char *why){ fprintf(stderr,"gguf: %s\n",why); exit(1); }
@@ -3041,6 +3177,7 @@ static Tensor must(const char *name) {
 
 static int g_gguf_deferred_warm; /* set when CWENR will own Q4_0 */
 static void rebind_layers_from_tens(void); /* binds W[] from Tens[], validating kernel contracts */
+static void dflash_bad(const char *why);
 static void load_gguf(const char *path) {
   int fd=open(path,O_RDONLY); if(fd<0){perror(path);exit(1);}
   struct stat st;
@@ -3218,6 +3355,38 @@ static void rebind_layers_from_tens(void) {
       snprintf(n,sizeof n,"blk.%d.attn_output.weight",l); W[l].wo=must_mat_sh(n,NH*HD,H);
       snprintf(n,sizeof n,"blk.%d.attn_q_norm.weight",l); W[l].q_norm=must_f32_n(n,HD);
       snprintf(n,sizeof n,"blk.%d.attn_k_norm.weight",l); W[l].k_norm=must_f32_n(n,HD);
+    }
+  }
+  /* ---- MTP nextn layer (blk.64) binding ---- */
+  {
+    memset(&NW,0,sizeof NW);
+    Tensor *mtp_tp; char mtp_nn[96];
+    #define MTP_BIND(f,suf) do{ \
+      snprintf(mtp_nn,sizeof mtp_nn,"blk.64.%s",suf); \
+      mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.f=*mtp_tp; }while(0)
+    MTP_BIND(attn_norm,"attn_norm.weight");
+    MTP_BIND(post_norm,"post_attention_norm.weight");
+    MTP_BIND(wq,"attn_q.weight");
+    MTP_BIND(wk,"attn_k.weight");
+    MTP_BIND(wv,"attn_v.weight");
+    MTP_BIND(wo,"attn_output.weight");
+    MTP_BIND(q_norm,"attn_q_norm.weight");
+    MTP_BIND(k_norm,"attn_k_norm.weight");
+    MTP_BIND(ffn_gate,"ffn_gate.weight");
+    MTP_BIND(ffn_up,"ffn_up.weight");
+    MTP_BIND(ffn_down,"ffn_down.weight");
+    { snprintf(mtp_nn,sizeof mtp_nn,"blk.64.nextn.eh_proj.weight");
+      mtp_tp=find_tensor(mtp_nn); if(mtp_tp){ NW.eh_proj=*mtp_tp; mtp_on=1; } }
+    { snprintf(mtp_nn,sizeof mtp_nn,"blk.64.nextn.enorm.weight");
+      mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.enorm=*mtp_tp; }
+    { snprintf(mtp_nn,sizeof mtp_nn,"blk.64.nextn.hnorm.weight");
+      mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.hnorm=*mtp_tp; }
+    { snprintf(mtp_nn,sizeof mtp_nn,"blk.64.nextn.shared_head_norm.weight");
+      mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.shared_head_norm=*mtp_tp; }
+    #undef NBIND
+    if(mtp_on){
+      if(NW.wq.ne0!=H||NW.wq.ne1!=NH*HD*2) dflash_bad("mtp q shape");
+      fprintf(stderr,"mtp: nextn layer bound\n");
     }
   }
 }
@@ -3692,6 +3861,12 @@ static void alloc_state(void) {
   if(!logits||!Srec||!Cstate||!Kcache||!Vcache){fprintf(stderr,"oom\n");exit(1);}
   memset(Srec,0,(size_t)L*LVH*LSD*LSD*sizeof(float));
   memset(Cstate,0,(size_t)L*QKV_DIM*(CONV_K-1)*sizeof(float));
+  if(mtp_on){
+    NKc=aligned_alloc(64,(size_t)g_ctx*NKV*HD*sizeof(float));
+    NVc=aligned_alloc(64,(size_t)g_ctx*NKV*HD*sizeof(float));
+    if(!NKc||!NVc){fprintf(stderr,"oom (nextn kv)\n");exit(1);}
+    mtp_kv_len=0;
+  }
   /* No KV memset: layer_full writes slot pos before any read at t<=pos.
       Scrubbing 2 GiB here would be pure startup latency. */
   /* Block scratch: shared by speculative verify AND batched prefill
@@ -4662,6 +4837,9 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
            tiny proposals, cooldown still protects against rejection streaks */
         int cap=E_cap<DL_BLOCK?E_cap:DL_BLOCK;
         E=dflash_draft(hist,hn,blk+1,cap<room?cap:room);
+      }else if(mtp_on){
+        int cap=E_cap<DL_BLOCK?E_cap:DL_BLOCK;
+        E=mtp_draft(hist,hn,blk+1,cap<room?cap:room);
       }else{
         int cap=E_cap<room?E_cap:room;
         static int scan_tmp[SPEC_BMAX];
