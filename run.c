@@ -4649,6 +4649,8 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
   }
   if(NGM.keys){ ng_update_range(hist,upd,hn); upd=hn; }
   int spec_debug=Scfg_debug; /* parsed+validated once in spec_config_init */
+  int E_cap=Scfg_max_draft<DL_BLOCK?Scfg_max_draft:DL_BLOCK;
+  const int cap_hard=E_cap;
   while(g<n_gen){
     if(pos_n+1>=g_ctx) break;            /* same context cap as serial path */
     int E=0;
@@ -4658,10 +4660,10 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
       if(dflash_on){
         /* the trained drafter proposes every cycle; min_draft still gates
            tiny proposals, cooldown still protects against rejection streaks */
-        int cap=Scfg_max_draft<DL_BLOCK?Scfg_max_draft:DL_BLOCK;
+        int cap=E_cap<DL_BLOCK?E_cap:DL_BLOCK;
         E=dflash_draft(hist,hn,blk+1,cap<room?cap:room);
       }else{
-        int cap=Scfg_max_draft<room?Scfg_max_draft:room;
+        int cap=E_cap<room?E_cap:room;
         static int scan_tmp[SPEC_BMAX];
         if(NGM.keys){
           /* chained map lookups first; the history scan still wins when it
@@ -4697,6 +4699,20 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
       acc_sum+=k;                        /* drafts kept this cycle */
       if(k==E) full++;
       else rej++;
+      /* adaptive draft sizing: track rolling acceptance over last 8 drafted
+         cycles; shrink E when acceptance drops below 25%, grow back when
+         above 50%. Bounded to [Scfg_min_draft, Scfg_max_draft]. */
+      {
+        static int recent[8]={0}; static int ridx=0, rsum=0, rfill=0;
+        rsum-=recent[ridx]; recent[ridx]=k; rsum+=recent[ridx];
+        ridx=(ridx+1)&7;
+        if(rfill<8) rfill++;
+        if(rfill>=4){
+          double rate=(double)rsum/(rfill*(double)E_cap);
+          if(rate<0.25 && E_cap>Scfg_min_draft+1) E_cap--;
+          else if(rate>0.50 && E_cap<cap_hard) E_cap++;
+        }
+      }
       if(k<E){
         /* short walk: undo the whole block (drafts and pend were committed
            by forward_block), then materialize pend + accepted drafts
