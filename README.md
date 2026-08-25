@@ -107,6 +107,12 @@ Measured on Zen 5 (9950X, one CCD), AVX-512, shared-box conditions:
 
 Acceptance is precision-sensitive: drafter weights want **Q8_0 or better**
 (Q4_0 acceptance measured at zero).
+<div align="center">
+<img src="docs/assets/acceptance.svg" width="400" />
+&nbsp;
+<img src="docs/assets/block_ceiling.svg" width="400" />
+</div>
+
 Full numbers and methodology: [docs/DESIGN.md](docs/DESIGN.md),
 "Speculative decoding landscape".
 

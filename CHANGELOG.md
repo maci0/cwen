@@ -2,6 +2,35 @@
 
 Lab notebook for the Qwen3.8-27B decode-throughput loop.
 
+## 2026-08-25: adaptive draft sizing + residency mode + profiling
+
+### Adaptive draft sizing
+Rolling 8-cycle window tracks kept-draft ratio; below 25% shrinks E_cap by
+one, above 50% grows by one, bounded to [min_draft, max_draft]. Prevents
+wasting verify sweeps when the drafter can't find proposals (drifting text,
+novel content). Strawberry acceptance unchanged at 5.71 avg kept.
+
+### CWEN_RESIDENCY=1
+Memory-hygiene package from cachelm L3-residency learnings applied to a
+model that cannot fit cache: THP hints on heap arenas, mlock weight mmap,
+prefault large allocations, next-layer software prefetch, T0 hint.
+Standalone knobs: CWEN_PF_T0, CWEN_NO_PF, CWEN_PIPE_PF.
+
+### Profiling
+Interactive flamegraph (`docs/assets/flamegraph-dflash2.svg`) generated via
+perf record + FlameGraph on 128-tok strawberry DFlash2 workload (32,695
+samples). 88% self-time in four dot kernels streaming weights at memory
+bandwidth. Tooling in `tools/flame_profile.sh`.
+
+## 2026-08-25: adaptive draft sizing + residency + profiling charts
+
+- **Adaptive draft sizing**: rolling 8-cycle acceptance window; below 25% shrinks E_cap, above 50% grows back. Strawberry unchanged at 5.71 avg kept; drifting workloads now get fewer wasted sweeps.
+- **CWEN_RESIDENCY=1**: THP hints on heap arenas, mlock weight mmap (15.3 GiB locked), prefault large allocations, next-layer software prefetch, T0 hint. Standalone knobs CWEN_PF_T0 / CWEN_NO_PF / CWEN_PIPE_PF.
+- **Interactive flamegraph** at docs/assets/flamegraph-dflash2.svg (32,695 samples): 88% self-time in four dot kernels streaming weights at memory bandwidth.
+- **Comparison charts**: acceptance by workload, container layout A/B, verify-block ceiling, drafter precision study — all generated from measured data, embedded in README and docs/DESIGN.md.
+- Fixed broken AVX512 branches in dot_q8s/dot_q8si (__m256 passed where __m512 expected).
+- Multi-column gemvb experiment attempted and reverted with documented rationale (L1-resident weights make re-reads free).
+
 ## 2026-08-24: drafter paired split-Q8 (.spec v2)
 
 - `.spec` container version bumped 1 -> 2: the packer now emits split-Q8

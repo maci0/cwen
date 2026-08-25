@@ -431,6 +431,41 @@ cwen measurements (greedy, byte-identical output verified in every case):
 | DFlash2 Q8_0 | avg kept 5.2-6.0, up to 7/9 full accepts | **1.66x** repeat-heavy; ~0.8x drifting (rejection snapshot+replay cost) | sweep 2026-08-23 |
 | Verify ceiling, any drafter | - | B=2: 1.46x, B=4: 2.69x, B=8: 3.91x per sweep | `bench_spec` BLOCK |
 
+Profiling (perf, AVX-512, 128 tok strawberry DFlash2):
+
+| Kernel | Self % | Role |
+|---|---|---|
+| `dot_q4_0rs_2row` | 26.1% | target backbone GEMV |
+| `dot_q4_0rsi` | 22.0% | interleaved gate/up dual-mat |
+| `dot_q6_K` | 17.2% | lm_head over full vocab |
+| `dot_q4_0rsi_2mat` | 14.3% | drafter paired gate/up |
+| `dot_q5_K` | 8.8% | ssm_out projection |
+
+88% self-time in four dot kernels streaming weights at memory bandwidth —
+the architecture is working as intended. Flamegraph at
+`docs/assets/flamegraph-dflash2.svg`. Adaptive draft sizing (rolling
+acceptance window) prevents waste on low-match workloads.
+
+### Measured comparison charts
+
+![Acceptance by workload](assets/acceptance.svg)
+
+![Container layout A/B](assets/layout_ab.svg)
+
+![Verify-block ceiling](assets/block_ceiling.svg)
+
+![Drafter precision](assets/precision.svg)
+
+### Comparison charts
+
+![Acceptance by workload](assets/acceptance.svg)
+
+![Container layout A/B](assets/layout_ab.svg)
+
+![Verify-block ceiling](assets/block_ceiling.svg)
+
+![Drafter precision](assets/precision.svg)
+
 Facts worth remembering:
 
 - Drafter quantization is categorical, not gradual: Q4_0 drafter weights gave
