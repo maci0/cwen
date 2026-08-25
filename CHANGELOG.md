@@ -31,6 +31,29 @@ bandwidth. Tooling in `tools/flame_profile.sh`.
 - Fixed broken AVX512 branches in dot_q8s/dot_q8si (__m256 passed where __m512 expected).
 - Multi-column gemvb experiment attempted and reverted with documented rationale (L1-resident weights make re-reads free).
 
+## 2026-08-25: adaptive draft sizing + residency + profiling
+
+### Adaptive draft sizing
+Rolling 8-cycle acceptance window; below 25% shrinks E_cap, above 50% grows.
+Strawberry unchanged (5.71 avg kept); drifting workloads get fewer wasted sweeps.
+
+### CWEN_RESIDENCY=1
+THP hints on heap arenas, mlock weight mmap (15.3 GiB locked), prefault,
+next-layer software prefetch, T0 hint. Standalone knobs: CWEN_PF_T0/PF/NO_PF.
+From cachelm L3-residency learnings applied to a model that cannot fit cache.
+
+### Profiling
+Interactive flamegraph at docs/assets/flamegraph-dflash2.svg (32,695 samples).
+88% self-time in four dot kernels streaming weights at memory bandwidth.
+Comparison charts: acceptance by workload, layout A/B, block ceiling, precision.
+
+### PR18 MTP status
+Structural support added: NextnW struct, blk.64 tensor binding, nextn KV cache
+allocation. The autoregressive draft loop and driver wiring remain as follow-up
+work (~150 LOC estimated). The blk.64 layer mirrors a target full-attn layer
+(NH=24, NKV=4, HD=256, output gate) plus eh_proj[10240→5120] for the
+concat(embed‖hidden) projection.
+
 ## 2026-08-24: drafter paired split-Q8 (.spec v2)
 
 - `.spec` container version bumped 1 -> 2: the packer now emits split-Q8
