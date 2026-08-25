@@ -1286,7 +1286,7 @@ static int matmul_type_ok(int ty) {
 static int g_no_pf;      /* disable weight prefetch entirely */
 static int g_pf_t0;      /* use T0 (all levels) instead of NTA */
 static int g_pipe_pf;    /* prefetch next layer's first weights */
-static int g_residency;  /* THP+mlock+prefault memory hygiene */
+static __attribute__((unused)) int g_residency;  /* THP+mlock+prefault memory hygiene */
 
 static inline void cwen_pf_w(const void *p) {
   if(g_no_pf) return;
