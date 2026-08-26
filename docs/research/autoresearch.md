@@ -63,7 +63,7 @@ This model: H=5120, I=17408, LSD=128, QKV=10240, V=248320 are all multiples of 1
 
 ## Paper / engine notes (2026-08-16)
 
-### arXiv 2608.03893 — Cross-Model KV Cache Transfer
+### arXiv 2608.03893: Cross-Model KV Cache Transfer
 
 Heo et al., NVIDIA, 2026-08-04. https://arxiv.org/abs/2608.03893
 

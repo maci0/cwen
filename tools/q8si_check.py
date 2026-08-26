@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from pack_dflash import drafter_safetensors
 
 
 def spec_tensor(data: bytes, entries: dict, name: str):
@@ -48,12 +49,7 @@ def st_rows(path: Path, key: str) -> np.ndarray:
 
 def main() -> int:
     spec = Path(sys.argv[1] if len(sys.argv) > 1 else "model/dflash2.spec")
-    stp = Path(
-        sys.argv[2]
-        if len(sys.argv) > 2
-        else "/home/maci/.cache/huggingface/hub/models--incoai--Qwen3.8-27B-DFlash2/"
-        "snapshots/dedf8df68adfb1afeaf7b7480c0a0243108177b4/model.safetensors"
-    )
+    stp = Path(sys.argv[2]) if len(sys.argv) > 2 else drafter_safetensors()
     data = spec.read_bytes()
     with spec.open("rb") as f:
         f.read(12)

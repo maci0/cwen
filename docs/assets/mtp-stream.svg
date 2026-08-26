@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 770.2752499999999 1702.068" width="770.2752499999999" height="1702.068" style="--bg:#FFFFFF;--fg:#27272A;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<g class="subgraph" data-id="target" data-label="target model, 64 layers">
+  <rect x="244.03324999999998" y="498.257" width="190.287" height="113.80000000000001" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="244.03324999999998" y="498.257" width="190.287" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="256.03324999999995" y="512.2570000000001" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">target model, 64 layers</text>
+</g>
+<g class="subgraph" data-id="commit" data-label="mtp_commit(p, t_p, x_p): once per verified position">
+  <rect x="51.039999999999964" y="773.857" width="558.1189999999999" height="453.711" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="51.039999999999964" y="773.857" width="558.1189999999999" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="63.039999999999964" y="787.857" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">mtp_commit(p, t_p, x_p): once per verified position</text>
+</g>
+<g class="subgraph" data-id="draft" data-label="mtp_draft(pend): only when mtp_hpos == pos_n">
+  <rect x="160.46474999999995" y="1287.568" width="464.25524999999993" height="283.6" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="160.46474999999995" y="1287.568" width="464.25524999999993" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="172.46474999999995" y="1301.568" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">mtp_draft(pend): only when mtp_hpos == pos_n</text>
+</g>
+<polyline class="edge" data-from="V" data-to="W" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="147.72454166666654,1625.168 147.72454166666654,1613.168 40.039999999999964,1613.168 40.039999999999964,378.457 254.25633333333332,378.457 254.25633333333332,215.61775" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="W" data-to="K" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="all E accepted" points="312.7955833333333,274.157 312.79558333333335,394.007" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="W" data-to="R" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="k &lt; E" points="371.33483333333334,215.61774999999994 371.33483333333334,317.257 563.4945833333334,317.257 563.4945833333334,394.007" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="R" data-to="N" data-style="dotted" data-arrow-start="false" data-arrow-end="true" points="596.29775,464.707 596.29775,544.807" fill="none" stroke="var(--_line)" stroke-width="1" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="T" data-to="H" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="339.17674999999997,598.607 339.17674999999997,666.057" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="H" data-to="C1" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="339.17674999999997,719.857 339.17674999999997,817.857" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="C3" data-to="D1" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="477.7064999999999,1211.568 477.7064999999999,1433.368" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D2" data-to="V" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="348.1854166666666,1555.1680000000001 348.1854166666666,1613.168 240.5008749999999,1613.168 240.5008749999999,1625.168" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="K" data-to="T" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="312.79558333333335,447.807 312.79558333333335,504.757 339.17674999999997,504.757 339.17674999999997,544.807" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="R" data-to="T" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="563.4945833333334,464.707 563.4945833333334,504.757 339.17674999999997,504.757 339.17674999999997,544.807" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="C1" data-to="C2" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="339.17674999999997,854.757 339.17674999999997,902.7570000000001" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="C2" data-to="C3" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="yes" points="365.1119166666666,1032.4328333333333 365.1119166666666,1070.368 477.7064999999999,1070.368 477.7064999999999,1174.668" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="C2" data-to="C4" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="no" points="313.24158333333327,1032.4328333333333 313.24158333333327,1070.368 200.64699999999996,1070.368 200.64699999999996,1174.668" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D1" data-to="D2" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="477.7064999999999,1470.268 477.7064999999999,1482.268 409.06091666666657,1482.268 409.06091666666657,1518.268" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D2" data-to="D3" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="348.1854166666666,1518.268 348.1854166666666,1482.268 335.69299999999987,1482.268 335.69299999999987,1397.368 348.1854166666666,1397.368 348.1854166666666,1385.368" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D3" data-to="D2" data-style="dotted" data-arrow-start="false" data-arrow-end="true" data-label="t &lt; E" points="262.3250833333333,1385.368 262.3250833333333,1397.368 274.8174999999999,1397.368 274.8174999999999,1482.268 287.3099166666666,1482.268 287.3099166666666,1518.268" fill="none" stroke="var(--_line)" stroke-width="1" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<g class="edge-label" data-from="W" data-to="K" data-label="all E accepted">
+  <rect x="271.2955833333333" y="317.157" width="82.99000000000001" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="312.7905833333333" y="332.30699999999996" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">all E accepted</text>
+</g>
+<g class="edge-label" data-from="W" data-to="R" data-label="k &lt; E">
+  <rect x="542.9945833333334" y="324.257" width="40.221999999999994" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="563.1055833333334" y="339.407" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">k &lt; E</text>
+</g>
+<g class="edge-label" data-from="C2" data-to="C3" data-label="yes">
+  <rect x="459.7064999999999" y="1101.368" width="35.47" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="477.4414999999999" y="1116.518" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">yes</text>
+</g>
+<g class="edge-label" data-from="C2" data-to="C4" data-label="no">
+  <rect x="185.647" y="1101.368" width="29.53" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="200.41199999999998" y="1116.518" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">no</text>
+</g>
+<g class="edge-label" data-from="D3" data-to="D2" data-label="t &lt; E">
+  <rect x="256.31749999999994" y="1436.668" width="36.658" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="274.64649999999995" y="1451.818" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">t &lt; E</text>
+</g>
+<g class="node" data-id="H" data-label="h_p = rmsnorm(x_p, output_norm)
+parked in NHprev, mtp_hpos = p" data-shape="rectangle">
+  <rect x="221.50125" y="666.057" width="235.35099999999994" height="53.800000000000004" rx="0" ry="0" fill="#dbeafe" stroke="#3b82f6" stroke-width="0.75" />
+  <text x="339.17674999999997" y="692.957" text-anchor="middle" font-size="13" font-weight="500" fill="#1e3a5f"><tspan x="339.17674999999997" dy="-3.9000000000000012">h_p = rmsnorm(x_p, output_norm)</tspan><tspan x="339.17674999999997" dy="16.900000000000002">parked in NHprev, mtp_hpos = p</tspan></text>
+</g>
+<g class="node" data-id="V" data-label="verify block: forward_block(pend, drafts)" data-shape="rectangle">
+  <rect x="54.94820833333324" y="1625.168" width="278.32899999999995" height="36.900000000000006" rx="0" ry="0" fill="#fef9c3" stroke="#eab308" stroke-width="0.75" />
+  <text x="194.11270833333322" y="1643.618" text-anchor="middle" font-size="13" font-weight="500" fill="#713f12" dy="4.55">verify block: forward_block(pend, drafts)</text>
+</g>
+<g class="node" data-id="W" data-label="walk: draft k == argmax at k-1?" data-shape="diamond">
+  <polygon points="312.7955833333333,40 429.87408333333326,157.0785 312.7955833333333,274.157 195.7170833333333,157.0785" fill="#fef9c3" stroke="#eab308" stroke-width="0.75" />
+  <text x="312.7955833333333" y="157.0785" text-anchor="middle" font-size="13" font-weight="500" fill="#713f12" dy="4.55">walk: draft k == argmax at k-1?</text>
+</g>
+<g class="node" data-id="K" data-label="keep block state
+commit rows 0..B-1" data-shape="rectangle">
+  <rect x="241.06208333333333" y="394.007" width="143.467" height="53.800000000000004" rx="0" ry="0" fill="#bbf7d0" stroke="#16a34a" stroke-width="0.75" />
+  <text x="312.79558333333335" y="420.907" text-anchor="middle" font-size="13" font-weight="500" fill="#14532d"><tspan x="312.79558333333335" dy="-3.9000000000000012">keep block state</tspan><tspan x="312.79558333333335" dy="16.900000000000002">commit rows 0..B-1</tspan></text>
+</g>
+<g class="node" data-id="R" data-label="snap_load, pos_n -= B
+forward_block(kept prefix)
+commit rows 0..k" data-shape="rectangle">
+  <rect x="465.08508333333333" y="394.007" width="196.81899999999996" height="70.7" rx="0" ry="0" fill="#fee2e2" stroke="#ef4444" stroke-width="0.75" />
+  <text x="563.4945833333334" y="429.357" text-anchor="middle" font-size="13" font-weight="500" fill="#7f1d1d"><tspan x="563.4945833333334" dy="-12.350000000000001">snap_load, pos_n -= B</tspan><tspan x="563.4945833333334" dy="16.900000000000002">forward_block(kept prefix)</tspan><tspan x="563.4945833333334" dy="16.900000000000002">commit rows 0..k</tspan></text>
+</g>
+<g class="node" data-id="N" data-label="nextn slots past pos_n are speculative:
+rewritten by the next commit,
+same invariant as the target KV" data-shape="rectangle">
+  <rect x="462.32025" y="544.807" width="267.9549999999999" height="70.7" rx="0" ry="0" fill="#f3e8ff" stroke="#9333ea" stroke-width="0.75" />
+  <text x="596.29775" y="580.157" text-anchor="middle" font-size="13" font-weight="500" fill="#581c87"><tspan x="596.29775" dy="-12.350000000000001">nextn slots past pos_n are speculative:</tspan><tspan x="596.29775" dy="16.900000000000002">rewritten by the next commit,</tspan><tspan x="596.29775" dy="16.900000000000002">same invariant as the target KV</tspan></text>
+</g>
+<g class="node" data-id="T" data-label="forward at position p
+residual x_p" data-shape="rectangle">
+  <rect x="260.03324999999995" y="544.807" width="158.287" height="53.800000000000004" rx="0" ry="0" fill="#dbeafe" stroke="#3b82f6" stroke-width="0.75" />
+  <text x="339.17674999999997" y="571.707" text-anchor="middle" font-size="13" font-weight="500" fill="#1e3a5f"><tspan x="339.17674999999997" dy="-3.9000000000000012">forward at position p</tspan><tspan x="339.17674999999997" dy="16.900000000000002">residual x_p</tspan></text>
+</g>
+<g class="node" data-id="C1" data-label="slot p needs t_p and h_p-1" data-shape="rectangle">
+  <rect x="245.58374999999998" y="817.857" width="187.18599999999998" height="36.900000000000006" rx="0" ry="0" fill="#dcfce7" stroke="#22c55e" stroke-width="0.75" />
+  <text x="339.17674999999997" y="836.307" text-anchor="middle" font-size="13" font-weight="500" fill="#14532d" dy="4.55">slot p needs t_p and h_p-1</text>
+</g>
+<g class="node" data-id="C2" data-label="mtp_hpos == p-1
+and p &gt;= 1?" data-shape="diamond">
+  <polygon points="339.1767499999999,902.7570000000001 416.9822499999999,980.5625 339.1767499999999,1058.368 261.3712499999999,980.5625" fill="#dcfce7" stroke="#22c55e" stroke-width="0.75" />
+  <text x="339.1767499999999" y="980.5625" text-anchor="middle" font-size="13" font-weight="500" fill="#14532d"><tspan x="339.1767499999999" dy="-3.9000000000000012">mtp_hpos == p-1</tspan><tspan x="339.1767499999999" dy="16.900000000000002">and p &gt;= 1?</tspan></text>
+</g>
+<g class="node" data-id="C3" data-label="mtp_step: write nextn K/V at slot p" data-shape="rectangle">
+  <rect x="362.2539999999999" y="1174.668" width="230.90499999999997" height="36.900000000000006" rx="0" ry="0" fill="#dcfce7" stroke="#22c55e" stroke-width="0.75" />
+  <text x="477.7064999999999" y="1193.118" text-anchor="middle" font-size="13" font-weight="500" fill="#14532d" dy="4.55">mtp_step: write nextn K/V at slot p</text>
+</g>
+<g class="node" data-id="C4" data-label="skip: slot 0 has no predecessor hidden" data-shape="rectangle">
+  <rect x="67.03999999999996" y="1174.668" width="267.214" height="36.900000000000006" rx="0" ry="0" fill="#dcfce7" stroke="#22c55e" stroke-width="0.75" />
+  <text x="200.64699999999996" y="1193.118" text-anchor="middle" font-size="13" font-weight="500" fill="#14532d" dy="4.55">skip: slot 0 has no predecessor hidden</text>
+</g>
+<g class="node" data-id="D1" data-label="slot pos_n+1: token = pend, h = NHprev" data-shape="rectangle">
+  <rect x="346.69299999999987" y="1433.368" width="262.027" height="36.900000000000006" rx="0" ry="0" fill="#fef9c3" stroke="#eab308" stroke-width="0.75" />
+  <text x="477.7064999999999" y="1451.818" text-anchor="middle" font-size="13" font-weight="500" fill="#713f12" dy="4.55">slot pos_n+1: token = pend, h = NHprev</text>
+</g>
+<g class="node" data-id="D2" data-label="lm_head over nextn output, argmax" data-shape="rectangle">
+  <rect x="226.43441666666658" y="1518.268" width="243.50199999999995" height="36.900000000000006" rx="0" ry="0" fill="#fef9c3" stroke="#eab308" stroke-width="0.75" />
+  <text x="348.1854166666666" y="1536.718" text-anchor="middle" font-size="13" font-weight="500" fill="#713f12" dy="4.55">lm_head over nextn output, argmax</text>
+</g>
+<g class="node" data-id="D3" data-label="slot pos_n+1+t: token = previous draft,
+h = previous nextn output" data-shape="rectangle">
+  <rect x="176.46474999999995" y="1331.568" width="257.5809999999999" height="53.800000000000004" rx="0" ry="0" fill="#fef9c3" stroke="#eab308" stroke-width="0.75" />
+  <text x="305.25524999999993" y="1358.468" text-anchor="middle" font-size="13" font-weight="500" fill="#713f12"><tspan x="305.25524999999993" dy="-3.9000000000000012">slot pos_n+1+t: token = previous draft,</tspan><tspan x="305.25524999999993" dy="16.900000000000002">h = previous nextn output</tspan></text>
+</g>
+</svg>

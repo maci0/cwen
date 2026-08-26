@@ -4,7 +4,7 @@
 
 **Pure-C inference for Qwen3.8-27B on the CPU you already own.**
 
-mmap Q4 GGUF · AVX2/AVX-512 kernels · GatedDeltaNet hybrid · DFlash2 speculative decoding · single-file `run.c`
+mmap Q4 GGUF · AVX2/AVX-512 kernels · GatedDeltaNet hybrid · lossless speculative decoding off the model's own MTP head · single-file `run.c`
 
 `make` · `./run model.gguf prompt.ids 96 -d 8` · lossless
 
@@ -107,7 +107,7 @@ Measured on Zen 5 (9950X, one CCD), AVX-512, shared-box conditions:
 |---|---|
 | Serial decode | ~2.8 tok/s |
 | + n-gram drafter (pattern workloads) | 1.4-3.6x |
-| + MTP nextn drafter (no sidecar) | 1.08-1.37x on 4 of 5 workloads; 4.2-8.0 tokens kept/cycle |
+| + MTP nextn drafter (no sidecar) | 1.08-1.37x on 4 of 5 workloads, 0.90x on prose; 1.4-8.0 tokens kept/cycle |
 | + DFlash2 drafter (repeat-heavy) | **1.66x wall**, 5-6 tokens kept/cycle |
 | Verify-block ceiling (B=8) | 3.91x vs serial forwards |
 
@@ -168,6 +168,9 @@ weight or kernel changes cannot silently alter output.
 - [DFlash2](https://inco.ai/blog/dflash2/) by Inco AI (drafter checkpoint
   `incoai/Qwen3.8-27B-DFlash2`, Apache-2.0)
 - Reference study material: llama.cpp sources under `ref/` (MIT)
+- [FlameGraph](https://github.com/brendangregg/FlameGraph) by Brendan Gregg,
+  vendored as `tools/flamegraph.pl` and `tools/stackcollapse-perf.pl` (CDDL-1.0,
+  text in `tools/vendor/cddl1.txt`; pin and drift check in `tools/vendor/`)
 
 ## License
 

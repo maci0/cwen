@@ -2,7 +2,7 @@
 
 Target: one kernel at a time. Correctness before speed. Zen 3+ = **AVX2 baseline**; Zen 4/5 = `make AVX512=1`.
 
-## Current baselines (2026-07-14, Ryzen 9 9950X — **Qwen3.6 era**; do not read as 3.8 numbers. 3.8 loop results live in `CHANGELOG.md` / `autoresearch.md`)
+## Current baselines (2026-07-14, Ryzen 9 9950X, **Qwen3.6 era**; do not read as 3.8 numbers. 3.8 loop results live in `CHANGELOG.md` / `autoresearch.md`)
 
 **Protocol:** 5 independent process trials × 10 timed iters, report **median**.  
 `tools/median_bench.py`. Build: `make AVX512=1 bench-q4_gemv`. **OMP=16** (one CCD; 24/32 thrash L3).
@@ -100,15 +100,15 @@ Protocol: `make`-style AVX512 build, OMP=16, 3–5×10-iter medians on goldens; 
 | Idea | flag | golden | Q4_0 med | decode tok/s | Verdict |
 |------|------|--------|----------|--------------|---------|
 | baseline | (none) | PASS | 0.079–0.090 | **2.55** | keep |
-| multirow 2 | `MULTIROW=2` | PASS | ~1.02× Q4 | — | no e2e win |
+| multirow 2 | `MULTIROW=2` | PASS | ~1.02× Q4 | n/a | no e2e win |
 | multirow 4 | `MULTIROW=4` | PASS | ~1.07–1.12× Q4 micro | **2.41 worse** | **reject** (BW thrash) |
-| Q8+int madd | `VNNI=1` | **FAIL** Q4 | 0.5× slower | — | **reject** |
+| Q8+int madd | `VNNI=1` | **FAIL** Q4 | 0.5× slower | n/a | **reject** |
 | fast silu poly | `FAST_SILU=1` | gemv PASS | n/a | tokens **wrong** (`2 198 0 271`) | **reject** |
 | madvise next layer | `MADVISE=1` | PASS | noise | ~2.50 | **reject** (no gain) |
 | CCD pin `{0}:16:1` | `CCD=1` | PASS | ~same | **2.59** | **keep (default)** |
-| weight prefetch T0 | `PF_T0=1` | PASS | slower | — | **reject** (NTA better) |
-| no prefetch | `NO_PF=1` | PASS | slower | — | **reject** |
-| copy act buffer | `COPY_X=1` | PASS | ~same | — | **reject** |
+| weight prefetch T0 | `PF_T0=1` | PASS | slower | n/a | **reject** (NTA better) |
+| no prefetch | `NO_PF=1` | PASS | slower | n/a | **reject** |
+| copy act buffer | `COPY_X=1` | PASS | ~same | n/a | **reject** |
 
 Re-run matrix:
 ```bash
@@ -183,7 +183,7 @@ tok/s via wall(n=8)−wall(n=2). Evidence: `SCRATCH/dram_mc/`.
 
 | Idea | flag | decode tok/s | Verdict |
 |------|------|--------------|---------|
-| baseline (pre) | — | **2.40–2.43** | |
+| baseline (pre) | n/a | **2.40–2.43** | |
 | **bg_stream** | `BG_STREAM=1` | **2.46–2.53** | **keep as flag** (default off; pair gemv superseded it) |
 | pipe_pf (page-walk l+1) | `PIPE_PF=1` | 2.41 | reject |
 | bg+pipe | both | 2.43 | reject (pipe cancels) |
@@ -218,7 +218,7 @@ Re-run:
 ## What not to do
 
 - Full f32 dequant of the model
-- OpenMP on tiny M (ssm_alpha etc.) — thr expression must keep them serial
+- OpenMP on tiny M (ssm_alpha etc.): thr expression must keep them serial
 - Multi-row Q4 microkernel without re-bench (proved slower here)
 - MADV_WILLNEED of entire 15 GiB each start (superseded: load-time residency is now the default, see the later note in "DRAM / MC experiments")
 - MADV_COLLAPSE on multi-GB weight maps (measured multi-tok/s regression)

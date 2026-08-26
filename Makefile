@@ -60,7 +60,7 @@ FORCE:
 
 .DEFAULT_GOAL := all
 
-.PHONY: all help setup lock pycheck clean check-loc lint gate golden verify verify-tsan verify-reproducible e2e verify-e2e e2e-full-c e2e-full-py verify-e2e-full ga bench-toks bench-spec idea-bench repack fuzz-seeds fuzz-run buildinfo bench-q4_gemv run_prof fuzz
+.PHONY: all help setup lock pycheck clean check-loc lint gate ga-check golden verify verify-tsan verify-reproducible e2e verify-e2e e2e-full-c e2e-full-py verify-e2e-full ga bench-toks bench-spec idea-bench repack fuzz-seeds fuzz-run buildinfo bench-q4_gemv run_prof fuzz
 
 all: run
 
@@ -86,6 +86,7 @@ help:
 	@echo "  make repack       Q4_0 -> CWENR sidecar for $(MODEL)"
 	@echo "  tools/download.sh fetch the GGUF into model/"
 	@echo "  make ga           GA tune cwen_tune.h (long)"
+	@echo "  make ga-check     GA expression tree: Python eval vs emitted C, parser rejects"
 	@echo "  make bench-toks   end-to-end tok/s of ./run"
 	@echo "  make idea-bench   A/B every CWEN_IDEA_* flag"
 	@echo "  make fuzz / fuzz-seeds / fuzz-run   loader fuzzing (needs clang)"
@@ -169,7 +170,7 @@ fuzz-seeds: | pycheck
 
 # Short guided run over seeds + grown corpus; artifacts under fuzz_out/.
 fuzz-run: fuzz
-	mkdir -p $(FUZZ_OUT)/corpus $(FUZZ_OUT)/artifacts tools/fuzz_corpus
+	mkdir -p $(FUZZ_OUT)/corpus $(FUZZ_OUT)/artifacts tools/fuzz_corpus .scratch
 	./fuzz_loader $(FUZZ_OUT)/corpus tools/fuzz_corpus \
 	  -artifact_prefix=$(FUZZ_OUT)/artifacts/ -max_total_time=60 \
 	  -rss_limit_mb=4096 -malloc_limit_mb=2048 -timeout=5 -close_fd_mask=3
@@ -239,6 +240,11 @@ verify-reproducible:
 # + run-to-run determinism. Builds its own binaries; logs under outputs/gates/.
 gate:
 	tools/test_speed_gates.sh outputs/gates
+
+# The GA scores a genome with eval_expr but the kernel runs expr_to_c output;
+# this pins the two together and checks the log parser rejects malformed trees.
+ga-check: | pycheck
+	$(PY) tools/ga_expr_check.py
 
 # GA + symbolic tune: tools/ga_evolve.py writes cwen_tune.h
 ga: | pycheck

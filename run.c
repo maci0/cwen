@@ -1393,7 +1393,11 @@ static inline void gemv_pf_row(const Tensor *W, int i, int pfd, int M) {
 
 /* Parallel if row-work amortizes GOMP fork (~300 regions/token was still a tax). */
 static inline int gemv_use_omp(int M, int K) {
-  int thr = CWEN_OMP_THRESH_EXPR(M, K);
+  /* long long, not int: the GA's evolved expression multiplies M and K, and a
+     32-bit intermediate would overflow (undefined) on the wide mats while the
+     GA scored the genome on Python's exact value. tools/ga_expr_check.py pins
+     the two evaluators together. */
+  long long thr = CWEN_OMP_THRESH_EXPR(M, K);
   if(M<=thr) return 0;
   long blocks = (long)M * ((long)K > 0 ? ((long)K/32) : 1);
   return blocks >= 4096; /* was 2048; cut medium-mat forks */
@@ -1689,7 +1693,7 @@ static inline void residual_add(float *dst, const float *delta, int n) {
   for(int i=0;i<n;i++) dst[i]+=delta[i];
 #endif
 }
-/* silu(a)*b into a — serial by default (NO_SILU_OMP=1): GOMP fork > elementwise work. */
+/* silu(a)*b into a, serial by default (NO_SILU_OMP=1): GOMP fork > elementwise work. */
 static inline void silu_mul(float *a, const float *b, int n) {
 #if !CWEN_IDEA_NO_SILU_OMP
   if(n>=1024){
@@ -2006,7 +2010,7 @@ static void __attribute__((unused)) madvise_span(const Tensor *t, int advice) {
   madvise((void*)page, n+(p-page), advice);
 }
 /* ---- GDN recurrent step (one token) ---- */
-/* S[h][i][j] : head h, dim i (k), dim j (v)  — matches llama AR [Sv,Sv,H] with row=k */
+/* S[h][i][j] : head h, dim i (k), dim j (v); matches llama AR [Sv,Sv,H] with row=k */
 static void gdn_step(int layer, float *qkv_mixed, float *z_row,
                      float *decay, float *beta, float *out) {
   float *S = Srec + (size_t)layer*LVH*LSD*LSD;
@@ -2038,7 +2042,7 @@ static void gdn_step(int layer, float *qkv_mixed, float *z_row,
     for(int i=0;i<LSD*LSD;i++) Sh[i]*=g;
 #endif
     float sk[LSD] __attribute__((aligned(64)));
-    /* sk[j] = sum_i S[i,j]*k[i] — column matvec */
+    /* sk[j] = sum_i S[i,j]*k[i], a column matvec */
 #if defined(CWEN_AVX512)
     for(int j=0;j<LSD;j+=16){
       __m512 s=_mm512_setzero_ps();
@@ -4264,7 +4268,7 @@ static int read_meta_name(const char *dir, char *name, int *ne0, int *ne1) {
 
 /* Fixture preflight for bench_q4_gemv: page-in of the model is tens of
    seconds, so a missing or truncated golden file must fail here, in ms,
-   with the path named -- not after load_model. */
+   with the path named, not after load_model. */
 static void golden_preflight(const char *dir,int ne0,int ne1){
   static const char *fn[]={"x.bin","y_ref.bin"};
   const size_t want[2]={(size_t)ne0*4,(size_t)ne1*4};
@@ -4731,7 +4735,7 @@ static int cw_fuzz_rowcmp(const void *x,const void *y){
    carries an in-range continuation and a positive count), then cross back
    over the persistence boundary: ng_save to a second file, reload into a
    second fresh map, and diff the entry sets including hit counts. Any
-   save/load drift -- lost entries, lost counts, altered continuations --
+   save/load drift (lost entries, lost counts, altered continuations)
    returns 2 and the harness aborts, so a deserialization regression becomes
    a fuzzer-visible liveness failure instead of silent cache decay.
    Returns 0 clean, 1 exit-rejected, 2 invariant or round-trip break. */
@@ -5103,8 +5107,14 @@ static void run_usage(FILE *out) {
     "  CWEN_ROPE_YARN=o,f     YaRN long-context scaling: original max,\n"
     "                         factor [,beta_fast,beta_slow]; e.g. 8192,4\n"
     "  CWEN_RESIDENCY=1       THP+mlock+prefault+next-layer PF\n"
+    "    CWEN_PF_T0=1             prefetch weights to L1 (T0) instead of NTA\n"
+    "    CWEN_NO_PF=1             disable weight prefetch entirely\n"
+    "    CWEN_PIPE_PF=1           prefetch the next layer's first weights\n"
     "  CWEN_NGRAM_CACHE=FILE  persist n-gram map across runs (needs CWEN_SPEC)\n"
-    "  CWEN_SPEC=1            n-gram block speculation (greedy-lossless)\n"
+    "  CWEN_SPEC=1            block speculation (greedy-lossless). Drafter:\n"
+    "                         CWEN_DFLASH, else the model's MTP nextn head\n"
+    "                         when present, else the n-gram map\n"
+    "  CWEN_MTP=0             do not use the MTP nextn head as the drafter\n"
     "  CWEN_DFLASH=FILE       trained DFlash2 drafter (.spec, see\n"
     "                         tools/pack_dflash.py); implies CWEN_SPEC=1\n"
     "    CWEN_SPEC_NGRAM_N=N      lookup key length (default 16)\n"

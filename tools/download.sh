@@ -42,15 +42,7 @@ if [[ ! -x "$PY" ]]; then
   echo "cwen: no .venv found; run 'make setup' first" >&2
   exit 1
 fi
-"$PY" - <<'PY'
-from huggingface_hub import hf_hub_download
-p = hf_hub_download(
-    repo_id="unsloth/Qwen3.8-27B-GGUF",
-    filename="Qwen3.8-27B-Q4_0.gguf",
-    local_dir="model",
-)
-print("DONE", p)
-PY
+"$PY" tools/hf_fetch.py unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-Q4_0.gguf model
 if ! check; then
   echo "downloaded artifact does not match the pin; refusing to keep it" >&2
   rm -f "$FILE"

@@ -28,3 +28,7 @@ tools/__pycache__/
 /.semcode.db*
 /.scratch/
 /ref/
+
+# agent scratch: handoff notes live in .scratch, not in the repo
+/HANDOFF.md
+/HANDOVER.md

@@ -42,12 +42,16 @@ static uint64_t got_pos[TRACE_CAP], ref_pos[TRACE_CAP];
 static char g_tmpdir[192], g_gguf[256], g_cwenr[256], g_spec[256];
 static char g_ngc[256], g_ngc2[256];
 
-/* Unique 0600 files via mkstemp: fixed /tmp/cwen_fuzz_<pid> names let any
-   local user pre-place a symlink and clobber whatever it points at when the
-   harness opens the path for writing (CWE-377/59). */
+/* Unique 0600 files via mkstemp: fixed cwen_fuzz_<pid> names let any local
+   user pre-place a symlink and clobber whatever it points at when the harness
+   opens the path for writing (CWE-377/59).
+
+   Default is the repo's .scratch, not /tmp: a fuzz run writes a candidate
+   GGUF per iteration, and /tmp is tmpfs here, so the corpus would be paid for
+   in RAM and lost on reboot. TMPDIR still overrides for a run elsewhere. */
 __attribute__((constructor)) static void fuzz_paths(void) {
   const char *tmp = getenv("TMPDIR");
-  if (!tmp || !tmp[0]) tmp = "/tmp";
+  if (!tmp || !tmp[0]) tmp = ".scratch";
   int n = snprintf(g_tmpdir, sizeof g_tmpdir, "%s", tmp);
   if (n < 0 || n >= (int)sizeof g_tmpdir) abort();
 }

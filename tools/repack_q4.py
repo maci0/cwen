@@ -45,7 +45,7 @@ F_IL_A = 1
 F_IL_B = 2
 STAMP_TAG = 0x4E455743  # b"CWEN"; pairs with CWENR_STAMP_TAG in run.c
 
-# (primary_suffix, partner_suffix) — primary written first as IL_A
+# (primary_suffix, partner_suffix): primary written first as IL_A
 PAIR_SUFFIXES = (
     ("ffn_gate.weight", "ffn_up.weight"),
     ("attn_k.weight", "attn_v.weight"),

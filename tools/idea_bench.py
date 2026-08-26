@@ -218,7 +218,7 @@ def main() -> int:
         row: dict[str, Any] = {"name": name, "flags": flags, "compile": True, "kernels": {}}
         all_ok = True
         for grel, label in GOLDENS:
-            # Q4_1/Q5 unaffected by multirow/vnni — still measure
+            # Q4_1/Q5 unaffected by multirow/vnni; still measure
             m = median_bench(bin_path, ROOT / grel, args.trials, args.iters, args.omp)
             row["kernels"][label] = m
             all_ok = all_ok and m["ok"]

@@ -29,7 +29,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 TUNE_H = ROOT / "cwen_tune.h"
@@ -45,14 +45,18 @@ DEFAULT_GOLDENS = [
 ]
 
 # ---- symbolic expression trees for thr = f(M, K) ----
-# Node: int const | "M" | "K" | (op, left, right)
-# ops: +, -, *, //, >>, max, min  (// and >> safe)
+# A node is an int constant, one of the two variables, or an (op, left, right)
+# triple. Var is a Literal rather than str so that eval_expr's variable checks
+# exhaust it and the remaining tuple arm is the only thing left to unpack.
+type Var = Literal["M", "K"]
+type Op = Literal["+", "-", "*", "//", ">>", "max", "min"]
+type Expr = int | Var | tuple[Op, "Expr", "Expr"]
 
-OPS = ("+", "-", "*", "//", ">>", "max", "min")
+OPS: tuple[Op, ...] = ("+", "-", "*", "//", ">>", "max", "min")
 CONST_POOL = (0, 1, 2, 4, 8, 16, 32, 48, 64, 96, 128, 256, 512, 1024, 2048, 4096)
 
 
-def rand_leaf(rng: random.Random) -> Any:
+def rand_leaf(rng: random.Random) -> Expr:
     r = rng.random()
     if r < 0.35:
         return "M"
@@ -61,14 +65,14 @@ def rand_leaf(rng: random.Random) -> Any:
     return rng.choice(CONST_POOL)
 
 
-def rand_expr(rng: random.Random, depth: int = 0, max_depth: int = 3) -> Any:
+def rand_expr(rng: random.Random, depth: int = 0, max_depth: int = 3) -> Expr:
     if depth >= max_depth or rng.random() < 0.4:
         return rand_leaf(rng)
     op = rng.choice(OPS)
     return (op, rand_expr(rng, depth + 1, max_depth), rand_expr(rng, depth + 1, max_depth))
 
 
-def eval_expr(node: Any, M: int, K: int) -> int:
+def eval_expr(node: Expr, M: int, K: int) -> int:
     if isinstance(node, int):
         return node
     if node == "M":
@@ -84,8 +88,9 @@ def eval_expr(node: Any, M: int, K: int) -> int:
     if op == "*":
         return av * bv
     if op == "//":
-        # match C int division (trunc toward zero), not Python floor
-        if bv == 0:
+        # match C division (trunc toward zero, not Python floor) and the
+        # emitted guard, which passes the numerator through for 0 and -1
+        if bv == 0 or bv == -1:
             return av
         q = abs(av) // abs(bv)
         return q if (av < 0) == (bv < 0) else -q
@@ -99,14 +104,20 @@ def eval_expr(node: Any, M: int, K: int) -> int:
     raise ValueError(op)
 
 
-def expr_to_c(node: Any) -> str:
-    """Emit a C integer expression using (M) and (K)."""
+def expr_to_c(node: Expr) -> str:
+    """Emit a C expression over (M) and (K), evaluated in long long.
+
+    Every leaf is widened so intermediates cannot overflow a 32-bit int, which
+    is undefined behaviour and would also make the emitted kernel disagree with
+    the eval_expr value the GA scored the genome on. gemv_use_omp takes the
+    result as long long; tools/ga_expr_check.py pins the two evaluators.
+    """
     if isinstance(node, int):
-        return str(node)
+        return f"{node}LL"
     if node == "M":
-        return "(M)"
+        return "(long long)(M)"
     if node == "K":
-        return "(K)"
+        return "(long long)(K)"
     op, a, b = node
     ca, cb = expr_to_c(a), expr_to_c(b)
     if op == "+":
@@ -116,8 +127,8 @@ def expr_to_c(node: Any) -> str:
     if op == "*":
         return f"(({ca})*({cb}))"
     if op == "//":
-        # safe div
-        return f"(({cb})!=0?({ca})/({cb}):({ca}))"
+        # guard 0 and -1: LLONG_MIN / -1 traps, same as any /0
+        return f"((({cb})>0||({cb})<-1)?({ca})/({cb}):({ca}))"
     if op == ">>":
         return f"(({ca})>>(({cb})<0?0:(({cb})>20?20:({cb}))))"
     if op == "max":
@@ -127,7 +138,7 @@ def expr_to_c(node: Any) -> str:
     raise ValueError(op)
 
 
-def mutate_expr(node: Any, rng: random.Random, p: float = 0.25) -> Any:
+def mutate_expr(node: Expr, rng: random.Random, p: float = 0.25) -> Expr:
     if rng.random() < p:
         return rand_expr(rng, 0, max_depth=rng.randint(1, 3))
     if isinstance(node, (int, str)):
@@ -140,19 +151,16 @@ def mutate_expr(node: Any, rng: random.Random, p: float = 0.25) -> Any:
     return (op, mutate_expr(a, rng, p), mutate_expr(b, rng, p))
 
 
-def crossover_expr(a: Any, b: Any, rng: random.Random) -> Any:
+def crossover_expr(a: Expr, b: Expr, rng: random.Random) -> Expr:
     if isinstance(a, (int, str)) or isinstance(b, (int, str)):
         return a if rng.random() < 0.5 else b
+    # both are (op, l, r) triples past the leaf guard above
     if rng.random() < 0.5:
-        return (a[0], crossover_expr(a[1], b[1] if isinstance(b, tuple) else b, rng), a[2])
-    return (
-        b[0] if isinstance(b, tuple) else a[0],
-        a[1],
-        crossover_expr(a[2], b[2] if isinstance(b, tuple) else b, rng),
-    )
+        return (a[0], crossover_expr(a[1], b[1], rng), a[2])
+    return (b[0], a[1], crossover_expr(a[2], b[2], rng))
 
 
-def simplify_const_expr(node: Any) -> Any:
+def simplify_const_expr(node: Expr) -> Expr:
     """Fold pure-const subtrees."""
     if isinstance(node, (int, str)):
         return node
@@ -180,7 +188,7 @@ class Genome:
     q4_unroll: int = 2
     q4_pf_blocks: int = 4
     omp_threads: int = 16
-    thr_expr: Any = 64  # symbolic tree or int
+    thr_expr: Expr = 64
     # fitness cache
     fitness: float = field(default=float("inf"), compare=False)
     per_kernel: dict = field(default_factory=dict, compare=False)
@@ -225,7 +233,7 @@ class Genome:
 def random_genome(rng: random.Random) -> Genome:
     # Prefer simple thr expressions early
     if rng.random() < 0.5:
-        thr: Any = rng.choice((16, 32, 48, 64, 96, 128, 256))
+        thr: Expr = rng.choice((16, 32, 48, 64, 96, 128, 256))
     else:
         thr = simplify_const_expr(rand_expr(rng, 0, max_depth=rng.randint(1, 3)))
     return Genome(
@@ -571,12 +579,30 @@ def apply_best() -> None:
     print(json.dumps(g.to_dict(), indent=2, default=str))
 
 
-def restore_expr(node: Any) -> Any:
-    if isinstance(node, list):
-        if len(node) == 3 and isinstance(node[0], str) and node[0] in OPS:
-            return (node[0], restore_expr(node[1]), restore_expr(node[2]))
+def _as_op(v: object) -> Op:
+    for op in OPS:
+        if v == op:
+            return op
+    raise ValueError(f"bad expr op: {v!r}")
+
+
+def restore_expr(node: object) -> Expr:
+    """Rebuild an Expr from the JSON log, where every tuple decoded as a list.
+
+    The log file is a trust boundary, so a malformed node raises here rather
+    than reaching expr_to_c and being emitted as broken C into cwen_tune.h.
+    """
+    if isinstance(node, bool):  # bool is an int subclass; not a valid const
+        raise ValueError(f"bad expr node: {node!r}")
+    if isinstance(node, int):
         return node
-    return node
+    if node == "M":
+        return "M"
+    if node == "K":
+        return "K"
+    if isinstance(node, list) and len(node) == 3:
+        return (_as_op(node[0]), restore_expr(node[1]), restore_expr(node[2]))
+    raise ValueError(f"bad expr node: {node!r}")
 
 
 def main() -> int:

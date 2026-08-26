@@ -22,11 +22,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 import sys
 from pathlib import Path
 
 import numpy as np
+
+DRAFTER_REPO = "models--incoai--Qwen3.8-27B-DFlash2"
+DRAFTER_SNAPSHOT = "dedf8df68adfb1afeaf7b7480c0a0243108177b4"
+
+
+def drafter_safetensors() -> Path:
+    """Default drafter checkpoint in the HF cache, honouring HF_HOME."""
+    cache = Path(os.environ.get("HF_HOME") or Path.home() / ".cache/huggingface")
+    return cache / "hub" / DRAFTER_REPO / "snapshots" / DRAFTER_SNAPSHOT / "model.safetensors"
+
 
 MAGIC = b"DFSP"
 VERSION = 1
@@ -145,10 +156,7 @@ def main() -> int:
     ap.add_argument(
         "src",
         nargs="?",
-        default=str(
-            Path.home() / ".cache/huggingface/hub/models--incoai--Qwen3.8-27B-DFlash2/snapshots/"
-            "dedf8df68adfb1afeaf7b7480c0a0243108177b4/model.safetensors"
-        ),
+        default=str(drafter_safetensors()),
         help="drafter safetensors path",
     )
     ap.add_argument("-o", "--out", default="model/dflash2.spec", help="output .spec path")

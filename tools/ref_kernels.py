@@ -286,7 +286,7 @@ def dequant_matrix_np(t: Tensor) -> np.ndarray:
             W[:, b * 32 + 16 : b * 32 + 32] = hi[:, b, :] * d[:, b : b + 1] + m[:, b : b + 1]
         return W
     if t.typ == T_Q6_K:
-        # only for small M tests — prefer gemv_q6_k_batched
+        # only for small M tests; prefer gemv_q6_k_batched
         bsz = q6_k_block_bytes()
         nb = K // QK_K
         raw = np.frombuffer(t.data, dtype=np.uint8).reshape(M, nb, bsz)

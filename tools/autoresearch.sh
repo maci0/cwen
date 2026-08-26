@@ -30,25 +30,20 @@ export OMP_NUM_THREADS="$OMP"
 export OMP_WAIT_POLICY="${OMP_WAIT_POLICY:-passive}"
 export GOMP_SPINCOUNT="${GOMP_SPINCOUNT:-100}"
 
-LOG=$(mktemp)
+mkdir -p .scratch
+LOG=$(mktemp "$ROOT/.scratch/autoresearch.XXXXXX")
 trap 'rm -f "$LOG"' EXIT
 "$PY" tools/bench_toks.py \
   --run "$RUN_BIN" --model "$MODEL" --prompt prompt1.ids \
   --ns "$NS" --trials "$TRIALS" --omp "$OMP" | tee "$LOG"
 
-# parse the decode-only line by its ASCII prefix; its tail carries non-ASCII
-# glyphs, so never byte-match past the prefix
-decode=$(grep '^decode-only' "$LOG" | grep -Eo '[0-9.]+ tok/s' | tail -1 \
-         | grep -Eo '^[0-9.]+' | head -1 || true)
-if [[ -z "${decode:-}" ]]; then
-  decode=$("$PY" - <<'PY' "$LOG"
-import re,sys
-t=open(sys.argv[1],encoding="utf-8",errors="replace").read()
-m=re.search(r"^decode-only.*\s([0-9.]+)\s+tok/s\s*$", t, re.M)
-print(m.group(1) if m else "nan")
-PY
-)
-fi
+# Anchor on the ASCII prefix and the trailing "tok/s": the middle of the line
+# carries non-ASCII glyphs, so byte-matching across it is not safe. LC_ALL=C
+# keeps sed on bytes rather than failing on invalid multibyte sequences.
+decode=$(LC_ALL=C sed -n \
+  's/^decode-only.*[[:space:]]\([0-9.][0-9.]*\)[[:space:]][[:space:]]*tok\/s[[:space:]]*$/\1/p' \
+  "$LOG" | tail -1)
+decode=${decode:-nan}
 toks=$(grep -Eo 'last tokens: \[[0-9, ]+\]' "$LOG" | tail -1 || true)
 echo "DECODE_TOK_S=${decode}"
 echo "TOKENS_LINE=${toks}"

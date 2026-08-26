@@ -1,0 +1,54 @@
+flowchart TD
+    subgraph target["target model, 64 layers"]
+        T["forward at position p<br/>residual x_p"]
+    end
+
+    T --> H["h_p = rmsnorm(x_p, output_norm)<br/>parked in NHprev, mtp_hpos = p"]
+
+    subgraph commit["mtp_commit(p, t_p, x_p): once per verified position"]
+        C1["slot p needs t_p and h_p-1"]
+        C2{"mtp_hpos == p-1<br/>and p >= 1?"}
+        C3["mtp_step: write nextn K/V at slot p"]
+        C4["skip: slot 0 has no predecessor hidden"]
+        C1 --> C2
+        C2 -->|yes| C3
+        C2 -->|no| C4
+    end
+
+    H --> C1
+
+    subgraph draft["mtp_draft(pend): only when mtp_hpos == pos_n"]
+        D1["slot pos_n+1: token = pend, h = NHprev"]
+        D2["lm_head over nextn output, argmax"]
+        D3["slot pos_n+1+t: token = previous draft,<br/>h = previous nextn output"]
+        D1 --> D2 --> D3
+        D3 -.->|"t < E"| D2
+    end
+
+    C3 --> D1
+    D2 --> V["verify block: forward_block(pend, drafts)"]
+
+    V --> W{"walk: draft k == argmax at k-1?"}
+    W -->|"all E accepted"| K["keep block state<br/>commit rows 0..B-1"]
+    W -->|"k < E"| R["snap_load, pos_n -= B<br/>forward_block(kept prefix)<br/>commit rows 0..k"]
+
+    K --> T
+    R --> T
+
+    N["nextn slots past pos_n are speculative:<br/>rewritten by the next commit,<br/>same invariant as the target KV"]
+    R -.-> N
+
+    classDef setup fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef sync fill:#dcfce7,stroke:#22c55e,color:#14532d
+    classDef migration fill:#fef9c3,stroke:#eab308,color:#713f12
+    classDef success fill:#bbf7d0,stroke:#16a34a,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#ef4444,color:#7f1d1d
+    classDef optional fill:#f3e8ff,stroke:#9333ea,color:#581c87
+
+    class T,H setup
+    class C1,C2,C3,C4 sync
+    class D1,D2,D3 migration
+    class V,W migration
+    class K success
+    class R danger
+    class N optional

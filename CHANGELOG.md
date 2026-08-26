@@ -2,9 +2,64 @@
 
 Lab notebook for the Qwen3.8-27B decode-throughput loop.
 
+## 2026-08-26: repo hygiene sweep, and two bugs it turned up
+
+Audit of the tree against the shared agent rules. Most findings were hygiene,
+but writing a check for one of them found a live correctness bug.
+
+### The GA scored genomes on numbers the kernel never computed
+`eval_expr` evaluates the evolved `thr = f(M, K)` tree in Python's exact
+integers; `expr_to_c` emitted C that `gemv_use_omp` read back into an `int`.
+For a tree containing a product, the two diverge once the value passes 2^31:
+at `M=17408, K=5120` one genome evaluated to 155155693568 in Python and
+536870912 in the compiled kernel, and signed overflow is undefined besides.
+The emitted expression now computes in `long long` and `gemv_use_omp` takes it
+as one; the `//` guard also excludes -1, since `LLONG_MIN / -1` traps the same
+way division by zero does.
+
+`tools/ga_expr_check.py` (`make ga-check`) pins the two evaluators together
+over 60 random trees by compiling the emitted C and comparing, and checks that
+the `best.json` parser rejects malformed trees rather than passing them to the
+C emitter. It is what found the overflow.
+
+### restore_expr accepted anything
+It read `golden/ga_log/best.json`, a trust boundary, and returned whatever it
+could not recognise unchanged, so a malformed tree reached `expr_to_c` and
+became broken C in `cwen_tune.h`. It now validates and raises. Typing the
+expression tree (`type Expr = int | Var | tuple[Op, Expr, Expr]`) is what
+exposed it: mypy flagged the dead `isinstance(b, tuple)` guards in
+`crossover_expr` and the unreachable tail in `restore_expr`, both hidden while
+eleven signatures were annotated `Any`.
+
+### Hygiene
+- `HANDOFF.md` untracked and gitignored; the durable parts (measurement traps,
+  remaining work) moved into `docs/DESIGN.md` where they get maintained.
+- Ten `.pyc` files untracked. `.gitignore` had listed the directory since
+  before they were committed, so the ignore was inert.
+- `tools/download.sh` and `tools/autoresearch.sh` no longer embed Python
+  heredocs. The download moved to `tools/hf_fetch.py`; the autoresearch parser
+  collapsed to one `sed`, replacing a grep chain plus a Python fallback that
+  did the same job two ways.
+- Hardcoded paths gone: `tools/flame_profile.sh` walks up for the project root,
+  and the drafter checkpoint default lives in `pack_dflash.drafter_safetensors()`
+  honouring `HF_HOME`, imported by `q8si_check.py` instead of duplicated.
+- FlameGraph is pinned. `tools/vendor/` records the upstream revision
+  (`41fee1f`), carries the CDDL text its headers point at, and `check.sh` diffs
+  the tree against it. README credits it.
+- `tools/fuzz_loader.c` defaults its scratch to `.scratch`, not `/tmp`: a fuzz
+  run writes a candidate GGUF per iteration and /tmp is tmpfs here.
+- Em dashes removed from every tracked file.
+- `--help` documents `CWEN_MTP`, `CWEN_PF_T0`, `CWEN_NO_PF`, `CWEN_PIPE_PF`,
+  which were implemented but undocumented.
+- Three overlapping 2026-08-25 changelog entries merged into one. The merged
+  text drops a claim that the AVX-512 `dot_q8s`/`dot_q8si` branches had been
+  fixed: they had not, and were still uncompilable a day later.
+- `docs/assets/mtp-stream.mmd` diagrams the nextn stream: which path writes
+  which slot, and what a rejected tail undoes.
+
 ## 2026-08-26: MTP nextn drafter works (PR18 finished)
 
-### The nextn forward was wrong in eight places, and never ran
+### The nextn forward was wrong in eight places
 `mtp_capture_hidden()` was never called, so every draft was conditioned on a
 zeroed hidden state. That alone pinned acceptance at zero; behind it sat a
 forward pass written against the *drafter's* geometry instead of the target's:
@@ -31,7 +86,8 @@ one step per verified position (prefill included); chained drafts recurse on
 the nextn layer's own output. Binding is now validated per tensor (shape and
 `matmul_type_ok`) instead of silently leaving a zeroed `Tensor` for `gemv`.
 
-Acceptance 0 -> **2.9-4.0 kept/cycle**, output byte-identical to serial decode
+Acceptance 0 -> **1.43 to 8.00 kept/cycle** at `-d 8`, depending on workload
+(per-case numbers in the table below), output byte-identical to serial decode
 on every prompt tested. Selected automatically when `blk.64` is present and no
 `CWEN_DFLASH` outranks it; `CWEN_MTP=0` opts out.
 
@@ -65,20 +121,20 @@ those cycles pays a rollback. It now drops straight to what the target took
 (`E_cap = max(min_draft, k)`) and probes upward only after four clean cycles.
 
 Together these two took a repeat prompt at `-d 8` from 62.6s to 35.0s (AVX2,
-same load window) -- they were applied together, so neither number is
+same load window). They were applied together, so neither number is
 attributable to one of them alone.
 
 ### Where a drafted cycle's time goes (`CWEN_SPEC_DEBUG=1`)
 Per draft token (AVX2 build, loaded box): nextn layer 8.7 ms, shared lm_head
 **27.8 ms**.
-The head, not the layer, sets the draft budget -- DFlash2 sidesteps it with a
+The head, not the layer, sets the draft budget; DFlash2 sidesteps it with a
 top-16 selector walk. Commits cost one nextn step per verified position (also
 8.7 ms), prefill included.
 
 ### Unpack-once batched GEMV: 1.6-2.1x on the verify sweep
 `gemvb` called a per-column dot B times per row, redoing the nibble split, the
 int8->f32 widen and the scale multiply each time; only the weight *load* was
-shared. `gemvb` also had no interleaved path at all -- `T_Q4_0RSI`, which is
+shared. `gemvb` also had no interleaved path at all. `T_Q4_0RSI`, which is
 164 of 352 tensors and includes the two widest matrices in the model
 (`ffn_gate`/`ffn_up`, 17408x5120), fell through to the generic per-column
 `gemv_row` loop.
@@ -89,7 +145,7 @@ register file. Wider blocks and non-AVX-512 builds keep the old path;
 `-DCWEN_NO_BCOL` compiles it out for A/B.
 
 Min-of-R over alternating runs, `bench_spec` (loadavg ~45, so read the ratios,
-not the absolutes -- `B=1` is the control, it does not take the new path):
+not the absolutes. `B=1` is the control: it does not take the new path):
 
 | tensor | layout | B=1 | B=2 | B=4 | B=8 |
 |---|---|---|---|---|---|
@@ -101,7 +157,7 @@ independent `gemv` calls.
 
 ### An AVX-512 Q4 kernel needs its *activation* vector 64B-aligned
 `dot_q4_0rs_avx512` loads the activation with `_mm512_load_ps`, so every buffer
-that reaches `gemv` as `x` has to be `__attribute__((aligned(64)))` -- which is
+that reaches `gemv` as `x` has to be `__attribute__((aligned(64)))`, which is
 why every activation global in the engine already carries it. `mtp_step`'s
 static buffers did not, and only `-flto` exposed it: without LTO the aligned
 load never materialized and the AVX-512 build passed, with LTO it faulted in
@@ -124,7 +180,7 @@ later steps still run the AVX2 binary.
 Blocks until the 1-minute loadavg drops under a ceiling (default: half the
 cores), then execs the command; exits 75 if the window never opened, so a
 caller can tell "never ran" from "ran and failed". Every absolute tok/s number
-in this repo needs it -- under load 21 the verify-block ceiling measures 1.46x
+in this repo needs it: under load 21 the verify-block ceiling measures 1.46x
 at B=8 against the documented quiet-box 3.91x.
 
 ### Do not A/B kernels with `perf stat` on the decode path
@@ -163,46 +219,20 @@ perf record + FlameGraph on 128-tok strawberry DFlash2 workload (32,695
 samples). 88% self-time in four dot kernels streaming weights at memory
 bandwidth. Tooling in `tools/flame_profile.sh`.
 
-## 2026-08-25: adaptive draft sizing + residency + profiling charts
+### Comparison charts
+Acceptance by workload, container layout A/B, verify-block ceiling, drafter
+precision study, generated from measured data and embedded in README and
+`docs/DESIGN.md`.
 
-- **Adaptive draft sizing**: rolling 8-cycle acceptance window; below 25% shrinks E_cap, above 50% grows back. Strawberry unchanged at 5.71 avg kept; drifting workloads now get fewer wasted sweeps.
-- **CWEN_RESIDENCY=1**: THP hints on heap arenas, mlock weight mmap (15.3 GiB locked), prefault large allocations, next-layer software prefetch, T0 hint. Standalone knobs CWEN_PF_T0 / CWEN_NO_PF / CWEN_PIPE_PF.
-- **Interactive flamegraph** at docs/assets/flamegraph-dflash2.svg (32,695 samples): 88% self-time in four dot kernels streaming weights at memory bandwidth.
-- **Comparison charts**: acceptance by workload, container layout A/B, verify-block ceiling, drafter precision study — all generated from measured data, embedded in README and docs/DESIGN.md.
-- Fixed broken AVX512 branches in dot_q8s/dot_q8si (__m256 passed where __m512 expected).
-- Multi-column gemvb experiment attempted and reverted with documented rationale (L1-resident weights make re-reads free).
+### Multi-column gemvb: attempted, reverted
+L1-resident weights made the re-reads free, so sharing them across columns
+bought nothing. Superseded 2026-08-26 by `dot_q4_bcol`, which cuts the
+repeated *dequantization* rather than the repeated load.
 
-## 2026-08-25: adaptive draft sizing + residency + profiling
-
-### Adaptive draft sizing
-Rolling 8-cycle acceptance window; below 25% shrinks E_cap, above 50% grows.
-Strawberry unchanged (5.71 avg kept); drifting workloads get fewer wasted sweeps.
-
-### CWEN_RESIDENCY=1
-THP hints on heap arenas, mlock weight mmap (15.3 GiB locked), prefault,
-next-layer software prefetch, T0 hint. Standalone knobs: CWEN_PF_T0/PF/NO_PF.
-From cachelm L3-residency learnings applied to a model that cannot fit cache.
-
-### Profiling
-Interactive flamegraph at docs/assets/flamegraph-dflash2.svg (32,695 samples).
-88% self-time in four dot kernels streaming weights at memory bandwidth.
-Comparison charts: acceptance by workload, layout A/B, block ceiling, precision.
-
-### PR18 MTP status (in progress)
-Structural support complete: NextnW binding (15 tensors), nextn KV cache
-alloc/commit, autoregressive mtp_draft() wired into spec driver behind
-mtp_on flag (auto-detected from blk.64 tensor presence). Runs losslessly.
-Acceptance currently at zero — the nextn forward produces numerically
-incorrect hidden states. Root cause: likely head-dim mapping or gate
-application in the attention path. Requires the same numpy cross-check
-debugging approach used successfully for DFlash2 (bisect per-layer).
-
-
-Structural support added: NextnW struct, blk.64 tensor binding, nextn KV cache
-allocation. The autoregressive draft loop and driver wiring remain as follow-up
-work (~150 LOC estimated). The blk.64 layer mirrors a target full-attn layer
-(NH=24, NKV=4, HD=256, output gate) plus eh_proj[10240→5120] for the
-concat(embed‖hidden) projection.
+### PR18 MTP: structural only
+NextnW binding, nextn KV cache, autoregressive `mtp_draft()` behind the
+`mtp_on` flag. Runs losslessly but every proposal is rejected. Fixed
+2026-08-26.
 
 ## 2026-08-24: drafter paired split-Q8 (.spec v2)
 
@@ -271,7 +301,7 @@ concat(embed‖hidden) projection.
 ## 2026-08-24: split-Q8 drafter container experiment (negative result)
 
 - `pack_dflash.py --layout split`: CWENR-style split streams for the drafter (Q8S singles, Q8SI gate/up + k/v pairs). Loader + kernels (dot_q8s, dot_q8si, df_dual_gemvb) verified numerically exact; lossless gate passes.
-- **Measured: split layout is 0.19-0.60x block-Q8 on decode tok/s** (interleaved A/B, best-of-3). At Q4 the split wins because nibble unpacking dominates and separating scales enables pure-nibble streams; at Q8 the block format's inline f16 scale already sits next to its qs bytes — one load serves both. Split turns every scale read into a distant second stream that defeats prefetching.
+- **Measured: split layout is 0.19-0.60x block-Q8 on decode tok/s** (interleaved A/B, best-of-3). At Q4 the split wins because nibble unpacking dominates and separating scales enables pure-nibble streams; at Q8 the block format's inline f16 scale already sits next to its qs bytes, so one load serves both. Split turns every scale read into a distant second stream that defeats prefetching.
 - Verdict: blocks is correct and optimal at Q8; split kept behind `--layout split` as a lossless-but-slower option. Do not use for production drafter containers.
 - Also fixed: dflash_commit ctx-K/V matvec now routes through df_dual_gemvb when pairs are bound (was calling gemv on unbound separate k/v tensors); loader accepts manifest types 3/4 with per-type byte accounting.
 
@@ -295,13 +325,13 @@ concat(embed‖hidden) projection.
 - `CWEN_OMP_THREADS` below 1 exits with a named error instead of silently clamping to 1, same silent-reinterpretation class the strict env parsers were written to kill.
 - `./run --help` now lists `CWEN_DUMP_LOGITS` and `CWEN_SPEC_DEBUG`; both were in the README table but had drifted out of the help text.
 
-## 2026-08-23 — harness trust boundaries
+## 2026-08-23: harness trust boundaries
 
 - Engine stdout is now parsed strictly by `tools/bench_toks.py` and `tools/spec_check.py`: every whitespace-separated field must be a decimal token id or the run fails naming the field. The old filter silently dropped non-numeric junk, so a corrupted stream shrank the pinned-chain comparison (test_speed_gates EXPECT) and the spec losslessness gate instead of failing them; empty output stays valid (n_predict=0 prefill).
 - `tools/spec_e2e.py` Server: stderr is drained continuously by a daemon thread (an undrained stderr pipe could block the engine mid-frame once it wrote ~64 KiB of summaries/traces; reachable today via an inherited CWEN_SPEC_DEBUG=1), reply reads are deadline-bounded (`--timeout`, default 900 s, also bounds startup), and engine death mid-reply now fails with exit status plus a stderr tail instead of a bare struct.error. A wedged engine gets a short shutdown grace after its frame times out.
 - Verified against stub engines (roundtrip, mid-frame death, hang timeout, stderr flood >64 KiB, exit before ready) and one real `./run ... prompt1.ids 4` decode through the strict parser.
 
-## 2026-08-23 — spec microbench + e2e suite
+## 2026-08-23: spec microbench + e2e suite
 
 - `tools/spec_sweep.py`: OFAT parameter sweep over resident servers (decode-only tok/s via `(t(n)-t(1))/(n-1)` so prefill cancels; min-of-reps; per-frame acceptance stats attributed by frame order; drift probe warns when box load moves >25% between bookends). First attempt was aborted mid-run by a load spike (0.5 tok/s plain at load 44); sweet-spot sweep still pending a quiet window.
 
@@ -312,7 +342,7 @@ concat(embed‖hidden) projection.
 - Driver now takes the plain serial step when no drafts are proposed (undrafted cycles no longer pay block machinery); spec stats line counts full accepts in avg kept.
 - `env_bool` restructured so every path returns (clang fuzz build warned: the exit reroute macro hides noreturn).
 
-## 2026-08-23 — block speculation (DFlash-style verify + n-gram drafter)
+## 2026-08-23: block speculation (DFlash-style verify + n-gram drafter)
 
 - `CWEN_SPEC=1` (or CLI `-d/--draft-tokens N`, alias `--spec-draft-n-max`, llama.cpp-style): greedy block speculation with a zero-weight prompt-lookup drafter. One batched forward (`forward_block`) scores `[pending token | drafts]`; every weight matrix streams once per block via new `gemvb` (row-hot across all B activations). Verify walk accepts the longest argmax-matching prefix plus the target's bonus token; short walks restore a GDN snapshot (`Srec`+`Cstate`) and replay only the kept prefix serially.
 - Lossless gate: token streams byte-identical to serial decode on all checks run (generic prompt 32 tok, strawberry repeat 96 tok at max_draft 3 and 8; `diff` clean). Drafter fires only on history repeats; cooldown after repeated full rejects keeps non-repetitive work near break-even.
@@ -320,19 +350,19 @@ concat(embed‖hidden) projection.
 - Knobs: `CWEN_SPEC_NGRAM_N` (16), `CWEN_SPEC_MAX_DRAFT` (8), `CWEN_SPEC_MIN_DRAFT` (2), `CWEN_SPEC_COOLDOWN` (8); CLI flag wins over env and implies `CWEN_SPEC=1`.
 - Known bounds: dumps cover prefill only under spec; trained DFlash2 drafter slots in behind `ngram_draft`'s contract (DESIGN.md PR17) once drafter weights are packaged.
 
-## 2026-08-23 — sidecar freshness stamp (cache-correctness pass)
+## 2026-08-23: sidecar freshness stamp (cache-correctness pass)
 
 - CWENR header reserved[8] is now a source stamp: `{u32 "CWEN", u32 src_pages}`; `repack_q4.py` writes it, `load_cwenr` enforces it (stale sidecar dropped with a message, full-GGUF fallback). Replacing a GGUF without repacking used to silently serve old weights from the sidecar.
 - `model/Qwen3.8-27B-Q4_0.cwenr` stamped in place (bytes 24..31); Qwen3.6 sidecar left untagged (source GGUF no longer on disk, trusted legacy).
 - Verified: tokens identical across sidecar-bound / stale-rejected / untagged paths (`0 198 2 220`); gemv goldens PASS; fuzz build compiles (stamp gate bypassed under `CWEN_FUZZ_LOADER` since the harness pairs one blob as both files).
 
-## 2026-08-16 — I100 cap
+## 2026-08-16: I100 cap
 
 Loop reached 100 iterations (jsonl iters 0–99). Tokens stayed `17 15 17 15 95859 17 15 17` except I64 FAST_SILU (quality fail).
 
 Best honest keep: **I06 GDN_OMP=1 + I03 AVX-512 GDN** at **2.792 tok/s** (n=8 ~4.04s). Later reconfirms drifted to ~4.6–4.7s n=8 from machine heat/variance. Do not treat 2.899/3.037/3.228 prints as wins; they were slow-n=2 artifacts.
 
-## 2026-08-16 — I05–I21 (resume)
+## 2026-08-16: I05–I21 (resume)
 
 - I05 CWENR v4 sidecar 12.44 GiB: tokens match, decode 2.682 (no metric win; keep layout)
 - I06 `CWEN_IDEA_GDN_OMP=1`: **2.792 tok/s keep** (best so far)
@@ -344,7 +374,7 @@ Best honest keep: **I06 GDN_OMP=1 + I03 AVX-512 GDN** at **2.792 tok/s** (n=8 ~4
 - I15–I21 schedule sweep: `dynamic,32` first print 2.899 was n=2 artifact; confirm 2.693. Keep `static,32`
 - RoPE sin/cos table added (quality-neutral). Next: fuse ssm_alpha/beta
 
-## 2026-08-16 — I04 pad + vector SiLU
+## 2026-08-16: I04 pad + vector SiLU
 
 - Masked zero-pad (`load_pad16`/`store_pad16`) on rmsnorm, l2norm, residual, f32 gemv, SiLU
 - Cephes-style `exp512` / `silu512` (not FAST_SILU)
@@ -352,16 +382,16 @@ Best honest keep: **I06 GDN_OMP=1 + I03 AVX-512 GDN** at **2.792 tok/s** (n=8 ~4
 - decode_tok_s **2.723** (n=8 median 3.970s, better than I03 4.119s; decode-only lower because n=2 also sped up)
 - Production dims already divide 16; pad path is unused except the predicted-true branch
 
-## 2026-08-16 — I03 GDN AVX-512
+## 2026-08-16: I03 GDN AVX-512
 
 - 16-wide FMA + 2-row unroll in `gdn_step` (C-Kernel-Engine)
 - decode_tok_s **2.759** (was 2.635). Tokens match. **keep**
 
-## 2026-08-16 — I02 clang-22
+## 2026-08-16: I02 clang-22
 
 - 2.427 tok/s. Tokens match. **revert** to gcc 16.2.1
 
-## 2026-08-16 — baseline I01
+## 2026-08-16: baseline I01
 
 - gcc 16.2.1, `make AVX512=1`, OMP=16, schedule `static,32`
 - decode_tok_s = **2.635** (n=2 median 1.781s, n=8 median 4.057s)
@@ -369,7 +399,7 @@ Best honest keep: **I06 GDN_OMP=1 + I03 AVX-512 GDN** at **2.792 tok/s** (n=8 ~4
 - BOS-only prompt; chain is the coherence oracle, not a chat eval
 - Historical 3.6 ~2.73 tok/s with CWENR; 3.8 has no sidecar yet
 
-## 2026-08-16 — session start
+## 2026-08-16: session start
 
 - Weights present: `model/Qwen3.8-27B-Q4_0.gguf` (15G).
 - GGUF: `qwen35`, 65 blocks, MTP `blk.64.nextn.*`, one Q8_0 tensor (`eh_proj`).
