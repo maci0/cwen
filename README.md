@@ -36,6 +36,8 @@ heap repacking at load, and every knob failing loudly instead of silently.
   snapshot/rollback of recurrent state. Bit-identical to serial decode:
   - *n-gram drafter* - prompt-lookup over token history, zero weights;
     optional counted map persisted across runs (`CWEN_NGRAM_CACHE`).
+  - **MTP nextn drafter** - the model's own `blk.64` head, already in the
+    GGUF. Auto-detected, no sidecar, no download (`CWEN_MTP=0` opts out).
   - **DFlash2 drafter** - trained 5-layer block-diffusion model conditioned
     on target hidden states, with grouped dynamic convs and a top-16
     candidate selector. Packs to ~2 GB Q8_0.
@@ -77,8 +79,11 @@ resident RAM ~12.7 GiB vs 15+ (GGUF pages dropped after rebind).
 ### Speculative decoding
 
 ```bash
-# n-gram drafter, zero extra weights (great on repeats/code/tool calls)
+# the model's own MTP nextn head: no sidecar, picked up automatically
 CWEN_SPEC=1 ./run model.gguf prompt.ids 256 -d 8
+
+# n-gram drafter instead (zero weights; great on repeats/code/tool calls)
+CWEN_MTP=0 CWEN_SPEC=1 ./run model.gguf prompt.ids 256 -d 8
 
 # trained DFlash2 drafter (~2 GiB sidecar, one-time pack)
 # fetch incoai/Qwen3.8-27B-DFlash2 with any HF client; the packer defaults
@@ -102,6 +107,7 @@ Measured on Zen 5 (9950X, one CCD), AVX-512, shared-box conditions:
 |---|---|
 | Serial decode | ~2.8 tok/s |
 | + n-gram drafter (pattern workloads) | 1.4-3.6x |
+| + MTP nextn drafter (no sidecar) | 1.08-1.37x on 4 of 5 workloads; 4.2-8.0 tokens kept/cycle |
 | + DFlash2 drafter (repeat-heavy) | **1.66x wall**, 5-6 tokens kept/cycle |
 | Verify-block ceiling (B=8) | 3.91x vs serial forwards |
 

@@ -8,13 +8,13 @@
 | **CPU target** | **Zen 3 and above** (AVX2 baseline; AVX-512 / AVX-VNNI optional on Zen 4/5) |
 | **LOC** | Prefer lean single-file `run.c`; **no hard line cap** |
 | **Weight format** | **GGUF Q4_0** (`unsloth/Qwen3.8-27B-GGUF` / `Qwen3.8-27B-Q4_0.gguf`, **16056478688 B / ~15.0 GiB**) |
-| **On-disk types** | Mixed (verified on the 3.8 GGUF, 2026-08-16): mostly **Q4_0**, plus **Q4_1** (some `ffn_down`), **Q5_K** (all `ssm_out`), **Q6_K** (`output.weight`), **F32** (norms, GDN aux, conv), **Q8_0×1** (MTP `blk.64.nextn.eh_proj`, unbound) |
+| **On-disk types** | Mixed (verified on the 3.8 GGUF, 2026-08-16): mostly **Q4_0**, plus **Q4_1** (some `ffn_down`), **Q5_K** (all `ssm_out`), **Q6_K** (`output.weight`), **F32** (norms, GDN aux, conv), **Q8_0×1** (MTP `blk.64.nextn.eh_proj`) |
 
 ---
 
 ## Overview
 
-**cwen** mmaps a **Q4_0** GGUF of Qwen3.8-27B and runs **text-only** decode on CPU in pure C. No network serve, no CUDA, no vision, no MTP (opt-in modes: stdin frame loop `CWEN_SERVER=1`; block speculation `CWEN_SPEC=1` with the n-gram drafter or the trained DFlash2 drafter `CWEN_DFLASH`, K18/PR17; no sockets). HF `model_type` is still `qwen3_5`; hidden layout matches 3.5/3.6-27B.
+**cwen** mmaps a **Q4_0** GGUF of Qwen3.8-27B and runs **text-only** decode on CPU in pure C. No network serve, no CUDA, no vision (opt-in modes: stdin frame loop `CWEN_SERVER=1`; block speculation `CWEN_SPEC=1` with the n-gram drafter, the model's own MTP nextn head (K19/PR18) or the trained DFlash2 drafter `CWEN_DFLASH`, K18/PR17; no sockets). HF `model_type` is still `qwen3_5`; hidden layout matches 3.5/3.6-27B.
 
 Quant choice: **Q4_0** (block of 32 × int4 + one f16 scale). Half the DRAM traffic of 8-bit, trivial nibble unpack for **AVX2** (Zen 3+), clean path to **AVX-VNNI** (Zen 4/5). GPTQ-8 was deleted: worse bandwidth, worse packing, no CPU win.
 
@@ -32,7 +32,7 @@ Architecture stays the hybrid HF model: 64 layers, 3:1 GatedDeltaNet : full atte
 - SIMD: **AVX2 required** (Zen 3+); AVX-512 behind `CWEN_AVX512` (compile-time flag; no runtime CPUID dispatch)
 
 ### Non-Goals
-- Vision encoder, MTP, chat UI, network serve, training
+- Vision encoder, chat UI, network serve, training
 - GPTQ / AWQ / MLX / NVFP4
 - Q4_K superblocks (format tax; re-evaluate only if quality fails)
 - Guaranteeing Zen 2 / pre-AVX2
@@ -49,7 +49,7 @@ Architecture stays the hybrid HF model: 64 layers, 3:1 GatedDeltaNet : full atte
 | K4 | **Single `run.c` + globals** | LOC + one-function-at-a-time opts; keep inference in one file |
 | K5 | **Fused Q4 GEMV** (never full f32 dequant) | Bandwidth is the wall; unpack tile → int/float MAC → scale in one pass |
 | K6 | **Compute fp32 for norms/GDN/attn softmax path** | Small tensors; keep correctness. Matmul is the int/Q4 game |
-| K7 | **Text-only; ignore vision/MTP tensors if present** | Scope |
+| K7 | **Text-only; ignore vision tensors if present** | Scope (MTP `blk.64` is bound as a drafter, K19) |
 | K8 | **Decode-first GDN recurrent; prefill = serial recurrent** | Chunk GDN costs too many LOC |
 | K9 | **Full-attn gate = sigmoid** (match transformers code, not config `swish` string) | HF source of truth |
 | K10 | **Two RMSNorm flavors** | Layer/q/k/final: plain `w * rms` (Gemma `(1+w)` guess was wrong; green e2e vs numpy ref + llama.cpp pin this). GDN out norm: `w * rms * silu(z)` |
@@ -61,6 +61,8 @@ Architecture stays the hybrid HF model: 64 layers, 3:1 GatedDeltaNet : full atte
 | K16 | **Opt-in stdin frame mode** (`CWEN_SERVER=1`) | Binary frames on stdin/stdout for bench harnesses; resets state per frame; no sockets, keeps the no-network non-goal |
 | K17 | **Sidecar freshness stamp** | Header bytes 24..31 carry `{tag "CWEN", source GGUF size in 4KiB pages}`; `load_cwenr` drops a stamped sidecar whose source size no longer matches and falls back to the full-GGUF path, so replacing a GGUF without repacking cannot serve old weights (untagged legacy sidecars keep working) |
 | K18 | **Opt-in n-gram block speculation** (`CWEN_SPEC=1` or `-d/--draft-tokens N`, greedy-lossless) | A drafter proposes a block after the pending token; one batched forward scores it, then a greedy walk keeps the longest verified prefix plus the target's own next pick. Greedy output is bit-identical to serial decode by construction; `tools/spec_check.py` pins this (identical token streams, both modes). Knobs: `CWEN_SPEC_NGRAM_N` / `_MAX_DRAFT` / `_MIN_DRAFT` / `_COOLDOWN`; optional `CWEN_NGRAM_CACHE=path` persists the counted n-gram map (NGC2) across runs; the CLI flag sizes the block like other engines' `--spec-draft-n-max`, wins over env, and implies `CWEN_SPEC=1`. Trained DFlash2 drafter plugs in behind the same proposal contract (shipped as `CWEN_DFLASH`, PR17) |
+| K19 | **MTP nextn drafter** (`blk.64`, auto-detected; `CWEN_MTP=0` opts out) | The GGUF already ships a full decoder block plus `nextn.{eh_proj,enorm,hnorm,shared_head_norm}`. Stream slot *j* pairs token *t_j* with the target's final normed hidden *h_{j-1}* and predicts *t_{j+1}*; slot 0 has no predecessor hidden, so the stream starts at slot 1. Geometry is the target's full-attn layer (NH=24, NKV=4, HD=256, per-head interleaved q/gate, sigmoid output gate, sectioned RoPE), so it reuses `rope_apply` and `attention_heads_kv` rather than carrying its own copies. Chained drafts recurse on the nextn layer's own output, the single-block head having no deeper hidden to feed itself. Ranks below `CWEN_DFLASH` and above the n-gram map |
+| K20 | **Unpack-once batched GEMV** (`dot_q4_bcol`, AVX-512, `2 ≤ B ≤ 8`) | `gemvb` called a per-column dot B times per row, so the nibble split, int8→f32 widen and scale multiply ran B times while only the weight *load* was shared; `T_Q4_0RSI` had no batched path at all and fell through to the generic `gemv_row` loop. The kernel dequantizes each 32-weight block once into two `__m512` and FMAs against every column, one accumulator per column so `B ≤ 8` fits the register file. Wider blocks and non-AVX-512 builds keep the per-column path; `-DCWEN_NO_BCOL` compiles it out for A/B. Measured min-of-R on `bench_spec`: `attn_qkv` 1.61x and `ffn_gate` 2.07x at B=8, with the B=1 control flat. Correctness is gated by `bench_spec`, which checks every GEMVB B against B independent `gemv` calls |
 
 ---
 
@@ -114,8 +116,8 @@ model/Qwen3.8-27B-Q4_0.gguf   # 16056478688 B (~15.0 GiB), GGUF v3, arch qwen35
   block_count = 65  (64 text layers + MTP blk.64), embedding_length = 5120
   tensors = 866
   type histogram: F32×456, Q4_0×352, Q4_1×8, Q5_K×48, Q6_K×1, Q8_0×1
-  Q8_0 = blk.64.nextn.eh_proj.weight (MTP; parsed, left unbound)
-  engine binds layers 0..63 only; extra/MTP tensors are ignored
+  Q8_0 = blk.64.nextn.eh_proj.weight (MTP eh_proj; bound, K19)
+  engine binds layers 0..63 as the trunk, blk.64 as the nextn drafter
 ```
 
 **Naming (llama.cpp / qwen35):**
@@ -416,11 +418,11 @@ post, Table 4); cwen columns are this box, greedy, shared-load conditions.
 | | baseline (serial) | MTP | DFlash | DFlash2 |
 |---|---|---|---|---|
 | Mechanism | one weight sweep per token | model's nextn head drafts autoregressively | 5-layer block-diffusion drafter fed target hidden states | DFlash + grouped dynamic convs + top-16 candidate selector |
-| Extra weights | none | ~1 nextn layer (already in the GGUF: `blk.64.nextn.*`, unbound) | ~1.9B | ~1.9B + ~65M conv/selector |
+| Extra weights | none | ~1 nextn layer (already in the GGUF: `blk.64.nextn.*`) | ~1.9B | ~1.9B + ~65M conv/selector |
 | Draft cost per cycle | 0 | ~1 small forward **per drafted token** | 1 window forward (~13 GMACs at B=8) | same + selector |
 | Acceptance length (published) | 1.0 | 4.28 mean | superseded; Muse Glimmer upgrade path 4.44 to 5.70 | **4.80** mean |
 | Throughput vs serial (their GPU stack) | 1x | ~2x | ~2.5-3x | **2.7-3.4x** |
-| In cwen | default path | not built (PR18 candidate; tensors already on disk) | skipped (checkpoint declares DFlash2) | shipped (`CWEN_DFLASH`) |
+| In cwen | default path | shipped (PR18, auto-detected from `blk.64`) | skipped (checkpoint declares DFlash2) | shipped (`CWEN_DFLASH`) |
 
 cwen measurements (greedy, byte-identical output verified in every case):
 
@@ -429,6 +431,7 @@ cwen measurements (greedy, byte-identical output verified in every case):
 | Serial decode | - | ~2.8 tok/s documented quiet-box AVX512 | CHANGELOG historical pin |
 | ngram-simple drafter | fires only on history repeats | 1.4-3.6x pattern workloads, ~parity elsewhere | `tools/spec_e2e.py` interleaved suite |
 | DFlash2 Q8_0 | avg kept 5.2-6.0, up to 7/9 full accepts | **1.66x** repeat-heavy; ~0.8x drifting (rejection snapshot+replay cost) | sweep 2026-08-23 |
+| MTP nextn (`blk.64`) | count 8.00, repeat 7.33, code 5.00, strawberry 4.20, prose 1.43 (`-d 8`); 11.00 at `-d 15` | 1.08-1.37x on four of five cases, 0.90x on prose (loadavg ~42, prefill-dominated frames) | `tools/spec_e2e.py` 2026-08-26 |
 | Verify ceiling, any drafter | - | B=2: 1.46x, B=4: 2.69x, B=8: 3.91x per sweep | `bench_spec` BLOCK |
 
 Profiling (perf, AVX-512, 128 tok strawberry DFlash2):
@@ -519,6 +522,11 @@ Sampling beyond argmax and BPE remain unbuilt.
 ### PR16 — N-gram block speculation (`CWEN_SPEC=1`, K18) — shipped
 - DFlash-style block verify in `run.c`; one batched forward per block, longest verified prefix kept, greedy output bit-identical to serial decode (`tools/spec_check.py`)
 ### PR17 — Trained DFlash2 drafter behind the `ngram_draft` proposal contract (`CWEN_DFLASH=model/dflash2.spec`) — shipped
+### PR18, MTP nextn drafter (`blk.64`, K19), shipped
+- Correct nextn forward (per-head q/gate split, sectioned RoPE, gated GQA over its own K/V, shared-head norm into the shared lm_head), one commit step per verified position, autoregressive chaining for E>1. Acceptance went 0 to 2.9-4.0 kept/cycle; output byte-identical to serial decode.
+- Short-walk rollback now re-scores the kept prefix in one block sweep instead of k+1 serial forwards, and adaptive sizing became AIMD on full accepts (acceptance *rate* rewarded exactly the draft lengths that short-walk every cycle).
+### PR20, Unpack-once batched GEMV (`dot_q4_bcol`, K20), shipped
+- Q4_0RS and Q4_0RSI rows dequantize once per 32-weight block and FMA against every column of the verify block; `attn_qkv` 1.61x and `ffn_gate` 2.07x at B=8.
 ### PR19 — n-gram counted map + persistent cache (`CWEN_NGRAM_CACHE`); runtime `CWEN_CTX` to 32768; opt-in YaRN (`CWEN_ROPE_YARN`) — shipped
 
 ---

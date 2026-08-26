@@ -2,6 +2,147 @@
 
 Lab notebook for the Qwen3.8-27B decode-throughput loop.
 
+## 2026-08-26: MTP nextn drafter works (PR18 finished)
+
+### The nextn forward was wrong in eight places, and never ran
+`mtp_capture_hidden()` was never called, so every draft was conditioned on a
+zeroed hidden state. That alone pinned acceptance at zero; behind it sat a
+forward pass written against the *drafter's* geometry instead of the target's:
+
+- `wk` and `wv` both wrote `kvm`, so V clobbered K, and both caches were then
+  filled from that one buffer
+- head loops used `DL_NH=32 / DL_HD=128` (DFlash2) where `blk.64` is
+  `NH=24 / NKV=4 / HD=256`, and the K/V cache stride was `NKV*DL_HD`
+- the q/gate split was missing entirely (they interleave per head), so the
+  output gate never applied
+- RoPE used the drafter's rotate-half table (64 pairs, `theta^{+2i/HD}`, no
+  minus sign) instead of the target's sectioned `rope_apply`
+- attention read V out of `NKc` at a bogus offset
+- `silu_mul` writes its *first* argument; `ffn_down` was fed the second
+- the head applied `output_norm` on top of `shared_head_norm`, then ran the
+  lm_head on the un-normed hidden anyway
+
+Rewritten against `ref/qwen35.cpp`'s `graph_mtp`: stream slot *j* pairs token
+*t_j* with the target's final normed hidden *h_{j-1}* and predicts *t_{j+1}*,
+so slot 0 has no predecessor and the stream starts at slot 1. Geometry is the
+target's full-attn layer, so `rope_apply` and a generalized
+`attention_heads_kv` are reused rather than re-derived. `mtp_commit()` folds
+one step per verified position (prefill included); chained drafts recurse on
+the nextn layer's own output. Binding is now validated per tensor (shape and
+`matmul_type_ok`) instead of silently leaving a zeroed `Tensor` for `gemv`.
+
+Acceptance 0 -> **2.9-4.0 kept/cycle**, output byte-identical to serial decode
+on every prompt tested. Selected automatically when `blk.64` is present and no
+`CWEN_DFLASH` outranks it; `CWEN_MTP=0` opts out.
+
+Same suite, wall-clock, three resident engines rotating frames so every arm
+samples the same load window (loadavg ~42, 24 generated tokens per frame, so
+prefill dominates and these understate steady-state decode). Before column is
+the same suite run at the start of this session, after the nextn forward was
+correct but before the driver and kernel fixes:
+
+| case | plain s | `-d 8` | `-d 3` | (before: `-d 8` / `-d 3`) |
+|---|---|---|---|---|
+| repeat | 69.6 | **1.15x** | **1.16x** | 0.90x / 0.85x |
+| strawberry | 30.3 | **1.10x** | **1.37x** | 1.02x / 1.44x |
+| code | 61.7 | **1.15x** | **1.26x** | 0.85x / 0.77x |
+| count | 70.8 | **1.12x** | 1.08x | 1.09x / 0.86x |
+| prose | 35.8 | 0.90x | 0.93x | 0.74x / 0.68x |
+
+`prose` is the drafter-hostile case (1.43 kept/cycle): the rejection cost
+dominates, exactly as DFlash2 does on drifting text.
+
+### Short walks stopped costing k+1 full forwards
+A rejected tail restored the snapshot and then re-ran the kept prefix through
+`forward_ex` once per token. It now re-scores that prefix with a single
+`forward_block(blk,k+1,0)`: the weights stream once either way, and `ustar`
+already came from `Blogits`, so the lm_head sweeps are skipped too.
+
+### Adaptive sizing is AIMD on full accepts, not on acceptance rate
+The rolling-rate rule rewarded exactly the draft lengths that short-walk every
+cycle: drafting 6 and keeping 5 rates at 83% and grows E, while every one of
+those cycles pays a rollback. It now drops straight to what the target took
+(`E_cap = max(min_draft, k)`) and probes upward only after four clean cycles.
+
+Together these two took a repeat prompt at `-d 8` from 62.6s to 35.0s (AVX2,
+same load window) -- they were applied together, so neither number is
+attributable to one of them alone.
+
+### Where a drafted cycle's time goes (`CWEN_SPEC_DEBUG=1`)
+Per draft token (AVX2 build, loaded box): nextn layer 8.7 ms, shared lm_head
+**27.8 ms**.
+The head, not the layer, sets the draft budget -- DFlash2 sidesteps it with a
+top-16 selector walk. Commits cost one nextn step per verified position (also
+8.7 ms), prefill included.
+
+### Unpack-once batched GEMV: 1.6-2.1x on the verify sweep
+`gemvb` called a per-column dot B times per row, redoing the nibble split, the
+int8->f32 widen and the scale multiply each time; only the weight *load* was
+shared. `gemvb` also had no interleaved path at all -- `T_Q4_0RSI`, which is
+164 of 352 tensors and includes the two widest matrices in the model
+(`ffn_gate`/`ffn_up`, 17408x5120), fell through to the generic per-column
+`gemv_row` loop.
+
+Both layouts now dequantize each 32-weight block once into two `__m512` and FMA
+them against every column, one accumulator per column so `B <= 8` fits the
+register file. Wider blocks and non-AVX-512 builds keep the old path;
+`-DCWEN_NO_BCOL` compiles it out for A/B.
+
+Min-of-R over alternating runs, `bench_spec` (loadavg ~45, so read the ratios,
+not the absolutes -- `B=1` is the control, it does not take the new path):
+
+| tensor | layout | B=1 | B=2 | B=4 | B=8 |
+|---|---|---|---|---|---|
+| `blk.0.attn_qkv` | Q4_0RS | 1.07x | 2.15x | 1.13x | **1.61x** |
+| `blk.0.ffn_gate` | Q4_0RSI | 1.03x | 1.22x | 1.75x | **2.07x** |
+
+Correctness is gated by `bench_spec`, which checks every GEMVB B against B
+independent `gemv` calls.
+
+### An AVX-512 Q4 kernel needs its *activation* vector 64B-aligned
+`dot_q4_0rs_avx512` loads the activation with `_mm512_load_ps`, so every buffer
+that reaches `gemv` as `x` has to be `__attribute__((aligned(64)))` -- which is
+why every activation global in the engine already carries it. `mtp_step`'s
+static buffers did not, and only `-flto` exposed it: without LTO the aligned
+load never materialized and the AVX-512 build passed, with LTO it faulted in
+`dot_q4_0rs_2row` on `ln`, 32 bytes off a cache line. Worth remembering that
+"AVX2 build is green" says nothing about this class of bug.
+
+### `-d 15` is now reachable
+`DL_BLOCK` (8) is the DFlash2 drafter's own walk limit; it was also capping the
+verify block for every other drafter. The block only has to fit `SPEC_BMAX`,
+which `CWEN_SPEC_MAX_DRAFT` is already validated against, so MTP can propose up
+to 15: measured 11.00 kept/cycle on `spec_check.ids` at `-d 15`.
+
+### CI now compiles the AVX-512 config
+It only ever built AVX2, which is how two broken 512-bit kernels sat in the
+tree for a release and how the unaligned-load fault above would have shipped.
+Compile-only (runners may lack the ISA), and ordered before the AVX2 build so
+later steps still run the AVX2 binary.
+
+### `tools/measure_when_quiet.sh`
+Blocks until the 1-minute loadavg drops under a ceiling (default: half the
+cores), then execs the command; exits 75 if the window never opened, so a
+caller can tell "never ran" from "ran and failed". Every absolute tok/s number
+in this repo needs it -- under load 21 the verify-block ceiling measures 1.46x
+at B=8 against the documented quiet-box 3.91x.
+
+### Do not A/B kernels with `perf stat` on the decode path
+`perf stat -e instructions:u ./run ... -d 8` reports ~21.7G instructions and
+5s of task-clock for a run that burns ~400 CPU-seconds: the counters are
+inherited by only part of the process, and they stay stable across
+configurations that do genuinely different work, which makes them look
+trustworthy. Wall-clock min-of-R on `bench_spec` and `tools/spec_e2e.py` are
+the measurements that hold up.
+
+### The AVX-512 build did not compile
+`dot_q8s` and `dot_q8si` carried half-finished 512-bit branches (`__m256`
+scales into `_mm512_mul_ps`, an undeclared `acc`, 8-byte loads converted as if
+16-wide). Both are Q8S/Q8SI split-container kernels, the layout already
+measured *slower* than blocks, so the branches are deleted rather than
+rewritten: AVX-512 builds use the AVX2 kernel there. `make AVX512=1` is clean
+under `-Werror` again.
+
 ## 2026-08-25: adaptive draft sizing + residency mode + profiling
 
 ### Adaptive draft sizing

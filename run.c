@@ -256,10 +256,28 @@ typedef struct {
   Tensor shared_head_norm;
 } NextnW;
 static NextnW NW;
-static int mtp_on;
-static float __attribute__((unused)) *NKc, *NVc;
-static __attribute__((unused)) float NHcap[H];
-static int mtp_kv_len __attribute__((unused));
+static int mtp_on;    /* blk.64 present and fully bound */
+static int mtp_use;   /* ...and selected as this run's drafter */
+static float *NKc, *NVc;   /* nextn K/V cache [g_ctx][NKV*HD] */
+static float NHprev[H] __attribute__((aligned(64)));  /* target final normed hidden at mtp_hpos */
+/* nextn scratch, file scope like the target path's x/xb/qh/... : every buffer
+   that reaches gemv as the activation vector must be 64B aligned, because the
+   AVX-512 Q4 kernels load it with _mm512_load_ps. */
+static float Nemb[H]        __attribute__((aligned(64)));
+static float Ncat[2*H]      __attribute__((aligned(64)));
+static float Nxw[H]         __attribute__((aligned(64)));
+static float Nresid[H]      __attribute__((aligned(64)));
+static float Nln[H]         __attribute__((aligned(64)));
+static float Nop[H]         __attribute__((aligned(64)));
+static float Nqfull[NH*HD*2] __attribute__((aligned(64)));
+static float Nqh[NH*HD]     __attribute__((aligned(64)));
+static float Ngq[NH*HD]     __attribute__((aligned(64)));
+static float Nao[NH*HD]     __attribute__((aligned(64)));
+static float Nkh[NKV*HD]    __attribute__((aligned(64)));
+static float Nvh[NKV*HD]    __attribute__((aligned(64)));
+static float Nffg[I]        __attribute__((aligned(64)));
+static float Nffu[I]        __attribute__((aligned(64)));
+static int mtp_hpos=-1;
 static float *DTapSer, *DTapBlk;   /* tap captures: serial / per-block-row */
 static float *Dctx;                /* committed context vectors [MAX_SEQ*H] */
 static float *Dkc, *Dvc;           /* drafter KV caches [L][MAX_SEQ][KV] */
@@ -1319,26 +1337,15 @@ static inline float dot_q8s(const Tensor *restrict W, const float *restrict x,
   const int K=W->ne0, nb=K/QK4;
   const int8_t *q=(const int8_t*)W->data+(size_t)row*K;
   const uint16_t *sc=(const uint16_t*)W->scales+(size_t)row*nb;
+  /* AVX2 only: same reason as dot_q8si below. The 512-bit branch this once
+     carried fed __m256 scales into _mm512 FMAs and never compiled. */
   __m256 acc=_mm256_setzero_ps();
-#if defined(CWEN_AVX512)
-  __m512 accH=_mm512_setzero_ps();
-#endif
   for(int b=0;b<nb;b++){
     const __m128i q0=_mm_loadl_epi64((const __m128i*)(q+b*32));
     const __m128i q1=_mm_loadl_epi64((const __m128i*)(q+b*32+8));
     const __m128i q2=_mm_loadl_epi64((const __m128i*)(q+b*32+16));
     const __m128i q3=_mm_loadl_epi64((const __m128i*)(q+b*32+24));
     const __m256 vd=_mm256_set1_ps(f16_to_f32(sc[b]));
-#if defined(CWEN_AVX512)
-    accH=_mm512_fmadd_ps(_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(q3)),vd),
-                         _mm512_loadu_ps(x+b*32+24),accH);
-    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q0)),vd),
-                        _mm256_loadu_ps(x+b*32),acc);
-    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1)),vd),
-                        _mm256_loadu_ps(x+b*32+8),acc);
-    acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q2)),vd),
-                        _mm256_loadu_ps(x+b*32+16),acc);
-#else
     acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q0)),vd),
                         _mm256_loadu_ps(x+b*32),acc);
     acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q1)),vd),
@@ -1347,13 +1354,8 @@ static inline float dot_q8s(const Tensor *restrict W, const float *restrict x,
                         _mm256_loadu_ps(x+b*32+16),acc);
     acc=_mm256_fmadd_ps(_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(q3)),vd),
                         _mm256_loadu_ps(x+b*32+24),acc);
-#endif
   }
-#if defined(CWEN_AVX512)
-  return hsum256(acc)+_mm512_reduce_add_ps(accH);
-#else
   return hsum256(acc);
-#endif
 }
 static inline float gemv_row(const Tensor *W, const float *x, int i) {
   /* an unknown type here would return 0.f and poison downstream activations
@@ -1520,6 +1522,50 @@ gemv(const Tensor *W, const float *restrict x, float *restrict y) {
   }
 }
 
+#if defined(CWEN_AVX512) && !defined(CWEN_NO_BCOL)
+/* Unpack-once Q4 row against B activation columns.
+   The per-column dot calls gemvb used to make redid the nibble split, the
+   int8->f32 widen and the scale multiply once per column; only the weight
+   *load* was shared. Streaming the row is already amortized by the block, so
+   what is left to cut is that ALU work: dequantize each 32-weight block into
+   two vectors once, then FMA them against every column. One accumulator per
+   column keeps the register file inside 32 zmm for B<=8 (8 accumulators,
+   2 weight vectors, 2 activation vectors); wider blocks stay on the
+   per-column path rather than spilling.
+
+   qstr/qoff and scstr/scoff select the layout, and both call sites pass
+   constants: split rows are (16,0)/(1,0), interleaved rows pack the pair into
+   one block as (32,side*16)/(2,side). */
+#define Q4RS_BCOL_MAX 8
+static inline void dot_q4_bcol(const uint8_t *restrict qs, size_t qstr, size_t qoff,
+                               const uint16_t *restrict sc, size_t scstr, size_t scoff,
+                               const float *restrict X, int xs, int nb,
+                               float *restrict Y, int ys, int B) {
+  const __m128i m4=_mm_set1_epi8(0x0f), m8=_mm_set1_epi8(8);
+  __m512 acc[Q4RS_BCOL_MAX];
+  for(int b=0;b<B;b++) acc[b]=_mm512_setzero_ps();
+  int pf = CWEN_Q4_PF_BLOCKS > 0 ? CWEN_Q4_PF_BLOCKS : 16;
+  for(int i=0;i<nb;i++){
+    if(i+pf<nb){
+      __builtin_prefetch(qs+(size_t)(i+pf)*qstr,0,0);
+      __builtin_prefetch(sc+(size_t)(i+pf)*scstr,0,0);
+    }
+    const __m128i q=_mm_load_si128((const __m128i*)(qs+(size_t)i*qstr+qoff));
+    const __m512 d=_mm512_set1_ps(f16_fast(sc[(size_t)i*scstr+scoff]));
+    const __m128i lo=_mm_sub_epi8(_mm_and_si128(q,m4),m8);
+    const __m128i hi=_mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(q,4),m4),m8);
+    const __m512 wl=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(lo)),d);
+    const __m512 wh=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(hi)),d);
+    const float *y=X+(size_t)i*QK4;
+    for(int b=0;b<B;b++,y+=xs){
+      acc[b]=_mm512_fmadd_ps(wl,_mm512_loadu_ps(y),acc[b]);
+      acc[b]=_mm512_fmadd_ps(wh,_mm512_loadu_ps(y+16),acc[b]);
+    }
+  }
+  for(int b=0;b<B;b++) Y[(size_t)b*ys]=_mm512_reduce_add_ps(acc[b]);
+}
+#endif
+
 /* Batched gemv: Y[b*ys+j] = row j of W dotted against activation column b.
    The weight row stays hot across all B dots, so a verify block costs one
    weight sweep instead of B; activations (KBs) live in cache. Row-pair fast
@@ -1533,6 +1579,18 @@ gemvb(const Tensor *Wt, const float *X, int xs, float *Y, int ys, int B) {
     const uint16_t *sc=(const uint16_t*)Wt->scales;
     size_t rqs=(size_t)nb*16,rsc=(size_t)nb;
     int pfd=CWEN_PREFETCH>0?CWEN_PREFETCH:4;
+#if defined(CWEN_AVX512) && !defined(CWEN_NO_BCOL)
+    if(B>=2&&B<=Q4RS_BCOL_MAX){
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+      for(int i=0;i<M;i++){
+        if(i+pfd<M) cwen_pf_w(qs+(size_t)(i+pfd)*rqs);
+        dot_q4_bcol(qs+(size_t)i*rqs,16,0,sc+(size_t)i*rsc,1,0,X,xs,nb,Y+i,ys,B);
+      }
+      return;
+    }
+#endif
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -1582,6 +1640,25 @@ gemvb(const Tensor *Wt, const float *X, int xs, float *Y, int ys, int B) {
     }
     return;
   }
+#if defined(CWEN_AVX512) && !defined(CWEN_NO_BCOL)
+  if(Wt->type==T_Q4_0RSI&&B>=2&&B<=Q4RS_BCOL_MAX){
+    int nb=(int)q4r_nb(K);
+    const uint8_t *qs=(const uint8_t*)Wt->data;
+    const uint16_t *sc=(const uint16_t*)Wt->scales;
+    size_t rqs=q4rsi_row_qs(K), rsc=(size_t)nb*2;
+    int side=Wt->pair_side;
+    int pf2=CWEN_PREFETCH>0?CWEN_PREFETCH:4;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for(int i=0;i<M;i++){
+      if(i+pf2<M) cwen_pf_w(qs+(size_t)(i+pf2)*rqs);
+      dot_q4_bcol(qs+(size_t)i*rqs,32,(size_t)side*16,
+                  sc+(size_t)i*rsc,2,(size_t)side,X,xs,nb,Y+i,ys,B);
+    }
+    return;
+  }
+#endif
   if(!gemv_use_omp(M,K)){
     for(int i=0;i<M;i++)
       for(int b=0;b<B;b++) Y[(size_t)b*ys+i]=gemv_row(Wt,X+(size_t)b*xs,i);
@@ -2276,17 +2353,19 @@ static void layer_linear(int layer) {
    DRAM re-reads (the weight sweep between layers flushes L3). Per-head math
    is unchanged and bit-identical: same dot kernels, same softmax sequence,
    same t-ascending output accumulation. */
-static void attention_heads(int layer,int pos,const float *qin,const float *gatein,float *yout) {
+/* Gated GQA over an explicit K/V stream. t0 lets a cache whose slot 0 is
+   never written (the nextn stream starts at slot 1) skip that row. */
+static void attention_heads_kv(const float *Kb,const float *Vb,int t0,int pos,
+                               const float *qin,const float *gatein,float *yout) {
   float scale=1.f/sqrtf((float)HD);
   const int kv_mul=NH/NKV;
   /* one softmax row per group member; rows stay L1-hot across t */
   static float ag[NH/NKV][MAX_SEQ] __attribute__((aligned(64)));
-  const float *Kb=Kcache+(size_t)layer*CTX_STRIDE*NKV*HD;
-  const float *Vb=Vcache+(size_t)layer*CTX_STRIDE*NKV*HD;
+  assert(t0>=0&&t0<=pos); /* an empty window would softmax uninitialized scores */
   memset(yout,0,(size_t)NH*HD*sizeof(float));
   for(int hkv=0;hkv<NKV;hkv++) {
     /* score the whole group against one shared K stream */
-    for(int t=0;t<=pos;t++) {
+    for(int t=t0;t<=pos;t++) {
       const float *k=Kb+((size_t)t*NKV+hkv)*HD;
       for(int m=0;m<kv_mul;m++)
         ag[m][t]=dot_f32(qin+(size_t)(hkv*kv_mul+m)*HD,k,HD)*scale;
@@ -2294,11 +2373,11 @@ static void attention_heads(int layer,int pos,const float *qin,const float *gate
     for(int m=0;m<kv_mul;m++) {
       int h=hkv*kv_mul+m;
       float *at=ag[m];
-      float mx=at[0]; for(int t=1;t<=pos;t++) if(at[t]>mx) mx=at[t];
-      float sum=0; for(int t=0;t<=pos;t++){ at[t]=expf(at[t]-mx); sum+=at[t]; }
-      float inv=1.f/sum; for(int t=0;t<=pos;t++) at[t]*=inv;
+      float mx=at[t0]; for(int t=t0+1;t<=pos;t++) if(at[t]>mx) mx=at[t];
+      float sum=0; for(int t=t0;t<=pos;t++){ at[t]=expf(at[t]-mx); sum+=at[t]; }
+      float inv=1.f/sum; for(int t=t0;t<=pos;t++) at[t]*=inv;
       float *o=yout+(size_t)h*HD;
-      for(int t=0;t<=pos;t++) {
+      for(int t=t0;t<=pos;t++) {
         const float *vv=Vb+((size_t)t*NKV+hkv)*HD;
         float a=at[t];
 #if defined(CWEN_AVX512)
@@ -2323,6 +2402,12 @@ static void attention_heads(int layer,int pos,const float *qin,const float *gate
 #endif
     }
   }
+}
+
+static void attention_heads(int layer,int pos,const float *qin,const float *gatein,float *yout) {
+  attention_heads_kv(Kcache+(size_t)layer*CTX_STRIDE*NKV*HD,
+                     Vcache+(size_t)layer*CTX_STRIDE*NKV*HD,
+                     0,pos,qin,gatein,yout);
 }
 
 static void layer_full(int layer) {
@@ -2797,10 +2882,11 @@ static inline void dot_q8si(const Tensor *restrict W, int r,
   const int8_t *qb=qa+rb;
   const uint16_t *sa=(const uint16_t*)(qa+K);
   const uint16_t *sb=(const uint16_t*)(qb+K);
+  /* AVX2 only: the 512-bit variant this once carried mixed __m256 accumulators
+     into _mm512 FMAs and never compiled. Q8SI is the experimental split
+     container that measured slower than blocks, so it gets the portable
+     kernel, not a second set of intrinsics. */
   __m256 aa=_mm256_setzero_ps(), ab=_mm256_setzero_ps();
-#if defined(CWEN_AVX512)
-  __m512 aaH=_mm512_setzero_ps(), abH=_mm512_setzero_ps();
-#endif
   for(int b=0;b<nb;b++){
     __m256 da=_mm256_set1_ps(f16_to_f32(sa[b]));
     __m256 db=_mm256_set1_ps(f16_to_f32(sb[b]));
@@ -2814,21 +2900,6 @@ static inline void dot_q8si(const Tensor *restrict W, int r,
     const __m128i b3=_mm_loadl_epi64((const __m128i*)(qb+b*32+24));
     const __m256 xl0=_mm256_loadu_ps(x+b*32), xl1=_mm256_loadu_ps(x+b*32+8);
     const __m256 xh0=_mm256_loadu_ps(x+b*32+16), xh1=_mm256_loadu_ps(x+b*32+24);
-#if defined(CWEN_AVX512)
-    const __m512 xl=_mm512_loadu_ps(x+b*32), xh=_mm512_loadu_ps(x+b*32+16);
-    __m512 wa0=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a0)),da);
-    __m512 wa1=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a1)),da);
-    __m512 wa2=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a2)),da);
-    __m512 wa3=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(a3)),da);
-    __m512 wb0=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b0)),db);
-    __m512 wb1=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b1)),db);
-    __m512 wb2=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b2)),db);
-    __m512 wb3=_mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepi8_epi32(b3)),db);
-    aa=_mm512_fmadd_ps(wa0,xl,aa); aaH=_mm512_fmadd_ps(wa1,xh,aaH);
-    aa=_mm512_fmadd_ps(wa2,xl,aa); aaH=_mm512_fmadd_ps(wa3,xh,aaH);
-    ab=_mm512_fmadd_ps(wb0,xl,ab); abH=_mm512_fmadd_ps(wb1,xh,abH);
-    ab=_mm512_fmadd_ps(wb2,xl,ab); abH=_mm512_fmadd_ps(wb3,xh,abH);
-#else
     __m256 wa0=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a0)),da);
     __m256 wa1=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a1)),da);
     __m256 wa2=_mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(a2)),da);
@@ -2841,14 +2912,8 @@ static inline void dot_q8si(const Tensor *restrict W, int r,
     aa=_mm256_fmadd_ps(wa2,xh0,aa); aa=_mm256_fmadd_ps(wa3,xh1,aa);
     ab=_mm256_fmadd_ps(wb0,xl0,ab); ab=_mm256_fmadd_ps(wb1,xl1,ab);
     ab=_mm256_fmadd_ps(wb2,xh0,ab); ab=_mm256_fmadd_ps(wb3,xh1,ab);
-#endif
   }
-#if defined(CWEN_AVX512)
-  *ya=hsum256(acc)+_mm512_reduce_add_ps(aaH);
-  *yb=hsum256(ab)+_mm512_reduce_add_ps(abH);
-#else
   *ya=hsum256(aa); *yb=hsum256(ab);
-#endif
 }
 /* batched dual pass over all B window columns for a Q8SI pair tensor */
 static void df_dual_gemvb(const Tensor *Wt,const float *X,int xs,
@@ -3016,123 +3081,103 @@ static int dflash_draft(const int *hist,int hn,int *out,int max_d){
 }
 
 /* ---- MTP forward (PR18) ----
-   The nextn layer is a single full-attention decoder layer that takes the
-   concatenation of [rmsnorm(embed(token), enorm), rmsnorm(h_target, hnorm)]
-   projected via eh_proj, runs one transformer pass with causal attention
-   over its own KV cache, and produces a hidden state for lm_head. */
+   blk.64 is a full-attention decoder block with the same geometry as the
+   target's full layers, fronted by the nextn projection. Slot j of the nextn
+   stream pairs token t_j with the target's final normed hidden h_{j-1} and
+   predicts t_{j+1}; slot 0 has no predecessor hidden, so the stream starts at
+   slot 1 and attention runs over [1..pos]. RoPE is relative, so indexing the
+   stream by the input token's own position (rather than the trained-time
+   shift-by-one) leaves scores unchanged. */
 
-
-/* capture target final hidden state after a committed token */
-static __attribute__((unused)) void mtp_capture_hidden(void){
-  memcpy(NHcap,xb,H*sizeof(float));
-}
-
-/* one autoregressive step through the nextn layer at position pos.
-   token_id = proposed input; h_target = captured final hidden from target.
-   Returns post-norm hidden state in out_h[H]. */
+/* one nextn step at stream slot `pos`: input token `token_id`, predecessor
+   target hidden `h_target`. Writes K/V into the nextn cache at `pos` and
+   returns the shared-head-normed hidden in out_h[H]. */
 static void mtp_step(int token_id,int pos,const float *h_target,float *out_h){
-  float att_l[MAX_SEQ];
-  static float emb_n[H],h_n[H],cat[2*H],xw[H],resid[H],ln[H];
-  static float qv[NH*HD*2],kvm[NKV*HD],ao[NH*HD];
-  static float ffg[I],ffu[I],ffd[H];
+  embed_token_to(token_id,Nemb);
+  rmsnorm(Ncat,  Nemb,    (const float*)NW.enorm.data,H);
+  rmsnorm(Ncat+H,h_target,(const float*)NW.hnorm.data,H);
+  gemv(&NW.eh_proj,Ncat,Nxw);
 
-  embed_token_to(token_id,emb_n);
-  rmsnorm(emb_n,emb_n,(const float*)NW.enorm.data,H);
-  rmsnorm(h_n,h_target,(const float*)NW.hnorm.data,H);
-  memcpy(cat,emb_n,H*sizeof(float));
-  memcpy(cat+H,h_n,H*sizeof(float));
-  gemv(&NW.eh_proj,cat,xw);
-
-  /* attention sublayer */
-  memcpy(resid,xw,H*sizeof(float));
-  rmsnorm(ln,xw,(const float*)NW.attn_norm.data,H);
-  gemv(&NW.wq,ln,qv);   /* NH*HD*2 output (query + gate) */
-  gemv(&NW.wk,ln,kvm);
-  gemv(&NW.wv,ln,kvm);
-
-  /* QK-norm per head */
-  for(int h=0;h<DL_NH;h++)
-    rmsnorm(qv+(size_t)h*DL_HD,qv+(size_t)h*DL_HD,
-            (const float*)NW.q_norm.data,DL_HD);
-  for(int h=0;h<NKV;h++)
-    rmsnorm(kvm+(size_t)h*DL_HD,kvm+(size_t)h*DL_HD,
-            (const float*)NW.k_norm.data,DL_HD);
-
-  /* RoPE at absolute position pos */
-  { const float *C=DRcos[pos],*S=DRsin[pos];
-    if(!DRdone[pos]){
-      for(int i=0;i<DL_HD/2;i++){
-        float fr=powf(DL_ROPE_THETA,(float)(2*i)/(float)DL_HD);
-        float ang=(float)pos*fr;
-        DRcos[pos][i]=cosf(ang); DRsin[pos][i]=sinf(ang);
-      }
-      DRdone[pos]=1;
-    }
-    for(int h=0;h<DL_NH;h++){ float *q=qv+(size_t)h*DL_HD;
-      for(int i=0;i<64;i++){float a=q[i],b=q[i+64];q[i]=a*C[i]-b*S[i];q[i+64]=a*S[i]+b*C[i];}}
-    for(int h=0;h<NKV;h++){ float *k=kvm+(size_t)h*DL_HD;
-      for(int i=0;i<64;i++){float a=k[i],b=k[i+64];k[i]=a*C[i]-b*S[i];k[i+64]=a*S[i]+b*C[i];}}
+  memcpy(Nresid,Nxw,H*sizeof(float));
+  rmsnorm(Nln,Nxw,(const float*)NW.attn_norm.data,H);
+  gemv(&NW.wq,Nln,Nqfull);
+  for(int h=0;h<NH;h++){                       /* q and gate interleave per head */
+    memcpy(Nqh+(size_t)h*HD,Nqfull+(size_t)h*HD*2,   HD*sizeof(float));
+    memcpy(Ngq+(size_t)h*HD,Nqfull+(size_t)h*HD*2+HD,HD*sizeof(float));
   }
+  gemv(&NW.wk,Nln,Nkh);
+  gemv(&NW.wv,Nln,Nvh);
+  for(int h=0;h<NH;h++)  rmsnorm(Nqh+(size_t)h*HD,Nqh+(size_t)h*HD,(const float*)NW.q_norm.data,HD);
+  for(int h=0;h<NKV;h++) rmsnorm(Nkh+(size_t)h*HD,Nkh+(size_t)h*HD,(const float*)NW.k_norm.data,HD);
+  rope_apply(Nqh,NH,pos);
+  rope_apply(Nkh,NKV,pos);
+  memcpy(NKc+(size_t)pos*NKV*HD,Nkh,NKV*HD*sizeof(float));
+  memcpy(NVc+(size_t)pos*NKV*HD,Nvh,NKV*HD*sizeof(float));
+  attention_heads_kv(NKc,NVc,1,pos,Nqh,Ngq,Nao);
 
-  /* store K,V in nextn cache at slot pos */
-  memcpy(NKc+(size_t)pos*NKV*DL_HD,kvm,NKV*DL_HD*sizeof(float));
-  memcpy(NVc+(size_t)pos*NKV*DL_HD,kvm,NKV*DL_HD*sizeof(float));
-
-  /* causal GQA attention over NKc/NVc[0..pos] */
-  memset(ao,0,(size_t)DL_NH*DL_HD*sizeof(float));
-  { float scale=1.f/sqrtf((float)DL_HD);
-    int kv_mul=DL_NH/NKV;
-    for(int h=0;h<DL_NH;h++){
-      int hk=h/kv_mul;
-      const float *q=qv+(size_t)h*DL_HD;
-      float mx=-INFINITY,sum=0.f;
-      for(int t=0;t<=pos;t++){
-        const float *k=NKc+(size_t)t*NKV*DL_HD+(size_t)hk*DL_HD;
-        float s=dot_f32(q,k,DL_HD)*scale;
-        att_l[t]=s;if(s>mx)mx=s;
-      }
-      for(int t=0;t<=pos;t++){att_l[t]=expf(att_l[t]-mx);sum+=att_l[t];}
-      float inv=1.f/sum;
-      float *o=ao+(size_t)h*DL_HD;
-      memset(o,0,DL_HD*sizeof(float));
-      for(int t=0;t<=pos;t++){
-        const float *v=NKc+(size_t)t*NKV*DL_HD+NKV*DL_HD;
-        float a=att_l[t]*inv;
-        for(int i=0;i<DL_HD;i++) o[i]+=a*v[(size_t)hk*DL_HD+i];
-      }
-    }
-  }
-  /* o_proj + residual */
-  { float op[H]; gemv(&NW.wo,ao,op);
-    for(int i=0;i<H;i++) resid[i]+=op[i]; }
-  /* MLP */
-  rmsnorm(ln,resid,(const float*)NW.post_norm.data,H);
-  gemv(&NW.ffn_gate,ln,ffg);
-  gemv(&NW.ffn_up,ln,ffu);
-  silu_mul(ffg,ffu,I);
-  gemv(&NW.ffn_down,ffu,ffd);
-  for(int i=0;i<H;i++) resid[i]+=ffd[i];
-  /* shared head norm → output */
-  rmsnorm(out_h,resid,(const float*)NW.shared_head_norm.data,H);
+  gemv(&NW.wo,Nao,Nop);
+  residual_add(Nresid,Nop,H);
+  rmsnorm(Nln,Nresid,(const float*)NW.post_norm.data,H);
+  gemv(&NW.ffn_gate,Nln,Nffg);
+  gemv(&NW.ffn_up,Nln,Nffu);
+  silu_mul(Nffg,Nffu,I);
+  gemv(&NW.ffn_down,Nffg,Nop);
+  residual_add(Nresid,Nop,H);
+  rmsnorm(out_h,Nresid,(const float*)NW.shared_head_norm.data,H);
 }
 
-/* autoregressive MTP drafting */
-static int mtp_draft(const int *hist,int hn,int *out,int max_d){
-  if(!mtp_on||hn<1||max_d<=0) return 0;
-  int room=g_ctx-1-(mtp_kv_len+1);
-  if(room<=0) return 0;
-  int n=max_d<room?max_d:room;
+/* Where a drafted cycle's time actually goes, under CWEN_SPEC_DEBUG=1: the
+   nextn layer is ~2% of a target sweep but the shared lm_head it needs per
+   proposal is ~7%, so the head, not the layer, sets the draft budget. */
+static double mtp_t_step,mtp_t_head,mtp_t_commit; static long mtp_n_step,mtp_n_head;
+static double mtp_now(void){
+  if(!Scfg_debug) return 0.0;
+  struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+  return (double)t.tv_sec+1e-9*(double)t.tv_nsec;
+}
+
+/* Fold the token the target just scored at `pos` into the nextn stream, then
+   park that position's final normed hidden for the next slot. Called once per
+   committed position, in order; x_pre is the target's residual stream before
+   output_norm. */
+static void mtp_commit(int pos,int token,const float *x_pre){
+  if(!mtp_use) return;
+  /* pos 0 has no predecessor hidden and no attendable slot (the stream starts
+     at 1): stepping it would softmax an empty window. It only parks h_0. */
+  if(pos>=1&&mtp_hpos==pos-1){
+    float oh[H] __attribute__((aligned(64)));
+    double t0=mtp_now();
+    mtp_step(token,pos,NHprev,oh);
+    mtp_t_commit+=mtp_now()-t0;
+  }
+  rmsnorm(NHprev,x_pre,(const float*)output_norm.data,H);
+  mtp_hpos=pos;
+}
+
+/* Autoregressive drafting: slot pos_n+1 takes the pending token against the
+   parked hidden, and every further slot recurses on the nextn layer's own
+   output (the single-block MTP head has no deeper hidden to feed it). Slots
+   past pos_n are speculative and get rewritten by mtp_commit as tokens land,
+   the same invariant the target's full-attn KV relies on. */
+static int mtp_draft(int pend,int *out,int max_d){
+  static float lg[V] __attribute__((aligned(64)));
+  float hprev[H] __attribute__((aligned(64))), oh[H] __attribute__((aligned(64)));
+  if(!mtp_use||mtp_hpos!=pos_n||max_d<=0) return 0;
+  int n=max_d;
+  if(pos_n+n>=g_ctx) n=g_ctx-1-pos_n;
   if(n<=0) return 0;
-  int prev=hist[hn-1];
-  static float cur_logits[V];
-  float cur_h[H];
-  int pos=mtp_kv_len;
+  memcpy(hprev,NHprev,sizeof hprev);
+  int tok=pend;
   for(int t=0;t<n;t++){
-    mtp_step(prev,pos,NHcap,cur_h);
-    rmsnorm(cur_logits,cur_h,(const float*)output_norm.data,H);
-    gemv(&output,cur_h,cur_logits);
-    out[t]=argmax_of(cur_logits);
-    prev=out[t]; pos++;
+    double t0=mtp_now();
+    mtp_step(tok,pos_n+1+t,hprev,oh);
+    double t1=mtp_now();
+    gemv(&output,oh,lg);
+    out[t]=argmax_of(lg);
+    double t2=mtp_now();
+    mtp_t_step+=t1-t0; mtp_t_head+=t2-t1; mtp_n_step++; mtp_n_head++;
+    tok=out[t];
+    memcpy(hprev,oh,sizeof hprev);
   }
   return n;
 }
@@ -3383,9 +3428,34 @@ static void rebind_layers_from_tens(void) {
       mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.hnorm=*mtp_tp; }
     { snprintf(mtp_nn,sizeof mtp_nn,"blk.64.nextn.shared_head_norm.weight");
       mtp_tp=find_tensor(mtp_nn); if(mtp_tp) NW.shared_head_norm=*mtp_tp; }
-    #undef NBIND
+    #undef MTP_BIND
     if(mtp_on){
-      if(NW.wq.ne0!=H||NW.wq.ne1!=NH*HD*2) dflash_bad("mtp q shape");
+      /* the drafter runs gemv straight off these; a partial bind would read
+         a zeroed Tensor (null data, type 0) instead of failing here */
+      const struct { const Tensor *t; const char *nm; int ne0,ne1; } req[] = {
+        {&NW.wq,"blk.64.attn_q",H,NH*HD*2},   {&NW.wk,"blk.64.attn_k",H,NKV*HD},
+        {&NW.wv,"blk.64.attn_v",H,NKV*HD},    {&NW.wo,"blk.64.attn_output",NH*HD,H},
+        {&NW.ffn_gate,"blk.64.ffn_gate",H,I}, {&NW.ffn_up,"blk.64.ffn_up",H,I},
+        {&NW.ffn_down,"blk.64.ffn_down",I,H}, {&NW.eh_proj,"blk.64.nextn.eh_proj",2*H,H},
+      };
+      for(size_t i=0;i<sizeof req/sizeof*req;i++){
+        if(req[i].t->ne0!=req[i].ne0||req[i].t->ne1!=req[i].ne1)
+          shape_bad(req[i].nm,req[i].t->ne0,req[i].t->ne1,req[i].ne0,req[i].ne1);
+        if(!matmul_type_ok(req[i].t->type)){
+          fprintf(stderr,"gguf: blk.64.%s: unsupported weight type %d\n",
+                  req[i].nm,req[i].t->type);
+          exit(1);
+        }
+      }
+      const struct { const Tensor *t; const char *nm; int n; } vreq[] = {
+        {&NW.attn_norm,"blk.64.attn_norm",H}, {&NW.post_norm,"blk.64.post_attention_norm",H},
+        {&NW.q_norm,"blk.64.attn_q_norm",HD}, {&NW.k_norm,"blk.64.attn_k_norm",HD},
+        {&NW.enorm,"blk.64.nextn.enorm",H},   {&NW.hnorm,"blk.64.nextn.hnorm",H},
+        {&NW.shared_head_norm,"blk.64.nextn.shared_head_norm",H},
+      };
+      for(size_t i=0;i<sizeof vreq/sizeof*vreq;i++)
+        if((long long)vreq[i].t->ne0*vreq[i].t->ne1<vreq[i].n)
+          shape_bad(vreq[i].nm,vreq[i].t->ne0,vreq[i].t->ne1,vreq[i].n,-1);
       fprintf(stderr,"mtp: nextn layer bound\n");
     }
   }
@@ -3861,11 +3931,10 @@ static void alloc_state(void) {
   if(!logits||!Srec||!Cstate||!Kcache||!Vcache){fprintf(stderr,"oom\n");exit(1);}
   memset(Srec,0,(size_t)L*LVH*LSD*LSD*sizeof(float));
   memset(Cstate,0,(size_t)L*QKV_DIM*(CONV_K-1)*sizeof(float));
-  if(mtp_on){
+  if(mtp_use){
     NKc=aligned_alloc(64,(size_t)g_ctx*NKV*HD*sizeof(float));
     NVc=aligned_alloc(64,(size_t)g_ctx*NKV*HD*sizeof(float));
     if(!NKc||!NVc){fprintf(stderr,"oom (nextn kv)\n");exit(1);}
-    mtp_kv_len=0;
   }
   /* No KV memset: layer_full writes slot pos before any read at t<=pos.
       Scrubbing 2 GiB here would be pure startup latency. */
@@ -3939,6 +4008,7 @@ static void reset_state(void) {
   memset(Srec, 0, (size_t)L * LVH * LSD * LSD * sizeof(float));
   memset(Cstate, 0, (size_t)L * QKV_DIM * (CONV_K - 1) * sizeof(float));
   pos_n = 0;
+  mtp_hpos = -1;   /* nextn stream restarts with the new prompt */
 }
 
 
@@ -4753,12 +4823,14 @@ static void prefill_forward(const int *tokens,int n_tok){
     for(int i=0;i<n_tok;i++){
       forward_ex(tokens[i], ddir&&ddir[0] ? 1 : i+1==n_tok);
       if(dflash_on) dflash_commit(pos_n,DTapSer);
+      mtp_commit(pos_n,tokens[i],x);
       if(i+1<n_tok) pos_n++;
     }
     return;
   }
   forward_ex(tokens[0],0);            /* seeds slot 0; forward_block appends */
   if(dflash_on) dflash_commit(0,DTapSer);
+  mtp_commit(0,tokens[0],x);
   int i=1;
   while(i<n_tok){
     int B=n_tok-i;
@@ -4769,6 +4841,8 @@ static void prefill_forward(const int *tokens,int n_tok){
     if(dflash_on)
       for(int b=0;b<B;b++)
         dflash_commit(pos_n-B+1+b,DTapBlk+(size_t)b*DL_TAPN*H);
+    for(int b=0;b<B;b++)
+      mtp_commit(pos_n-B+1+b,tokens[i+b],BXres+(size_t)b*H);
     if(i+B==n_tok){
       /* lm_head once, into the global the argmax reads (skipped in-block) */
       rmsnorm(xb,BXres+(size_t)(B-1)*H,(const float*)output_norm.data,H);
@@ -4824,8 +4898,10 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
   }
   if(NGM.keys){ ng_update_range(hist,upd,hn); upd=hn; }
   int spec_debug=Scfg_debug; /* parsed+validated once in spec_config_init */
-  int E_cap=Scfg_max_draft<DL_BLOCK?Scfg_max_draft:DL_BLOCK;
-  const int cap_hard=E_cap;
+  /* DL_BLOCK bounds the trained drafter's own walk; the verify block itself
+     only has to fit SPEC_BMAX, which Scfg_max_draft is already checked against */
+  const int cap_hard=(dflash_on&&Scfg_max_draft>DL_BLOCK)?DL_BLOCK:Scfg_max_draft;
+  int E_cap=cap_hard;
   while(g<n_gen){
     if(pos_n+1>=g_ctx) break;            /* same context cap as serial path */
     int E=0;
@@ -4837,9 +4913,8 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
            tiny proposals, cooldown still protects against rejection streaks */
         int cap=E_cap<DL_BLOCK?E_cap:DL_BLOCK;
         E=dflash_draft(hist,hn,blk+1,cap<room?cap:room);
-      }else if(mtp_on){
-        int cap=E_cap<DL_BLOCK?E_cap:DL_BLOCK;
-        E=mtp_draft(hist,hn,blk+1,cap<room?cap:room);
+      }else if(mtp_use){
+        E=mtp_draft(hist[hn-1],blk+1,E_cap<room?E_cap:room);
       }else{
         int cap=E_cap<room?E_cap:room;
         static int scan_tmp[SPEC_BMAX];
@@ -4866,6 +4941,7 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
       pos_n++;
       forward_ex(blk[0],1);
       if(dflash_on) dflash_commit(pos_n,DTapSer);
+      mtp_commit(pos_n,blk[0],x);
       ustar=argmax_logits();
     }else{
       int B=E+1;
@@ -4877,32 +4953,42 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
       acc_sum+=k;                        /* drafts kept this cycle */
       if(k==E) full++;
       else rej++;
-      /* adaptive draft sizing: track rolling acceptance over last 8 drafted
-         cycles; shrink E when acceptance drops below 25%, grow back when
-         above 50%. Bounded to [Scfg_min_draft, Scfg_max_draft]. */
+      /* Adaptive draft sizing (AIMD on full accepts). A short walk is what
+         costs: the block sweep is wasted past row k and the kept prefix has
+         to be re-scored. Acceptance *rate* is the wrong signal for that --
+         drafting 6 and keeping 5 rates well and short-walks every time --
+         so drop straight to what the target actually took, and probe upward
+         only after a run of clean cycles. */
       {
-        static int recent[8]={0}; static int ridx=0, rsum=0, rfill=0;
-        rsum-=recent[ridx]; recent[ridx]=k; rsum+=recent[ridx];
-        ridx=(ridx+1)&7;
-        if(rfill<8) rfill++;
-        if(rfill>=4){
-          double rate=(double)rsum/(rfill*(double)E_cap);
-          if(rate<0.25 && E_cap>Scfg_min_draft+1) E_cap--;
-          else if(rate>0.50 && E_cap<cap_hard) E_cap++;
+        static int fa_streak=0;
+        if(k==E){
+          if(++fa_streak>=4 && E_cap<cap_hard){ E_cap++; fa_streak=0; }
+        }else{
+          fa_streak=0;
+          E_cap = k>Scfg_min_draft ? k : Scfg_min_draft;
         }
       }
       if(k<E){
         /* short walk: undo the whole block (drafts and pend were committed
-           by forward_block), then materialize pend + accepted drafts
-           serially. Full accepts keep the block state as-is. */
+           by forward_block), then re-score pend + the accepted drafts. One
+           more block sweep, not k+1 serial ones: the weights stream once
+           either way and ustar already came from Blogits, so the head is
+           skipped too. Full accepts keep the block state as-is. */
         snap_load();
         pos_n-=B;
-        for(int i=0;i<=k;i++){ pos_n++; forward_ex(blk[i],1);
-          if(dflash_on) dflash_commit(pos_n,DTapSer); }
-      }else if(dflash_on){
-        /* every block row became context: commit taps row by row */
-        for(int b=0;b<B;b++)
-          dflash_commit(pos_n-B+1+b,DTapBlk+(size_t)b*DL_TAPN*H);
+        forward_block(blk,k+1,0);
+        for(int b=0;b<=k;b++){
+          if(dflash_on)
+            dflash_commit(pos_n-k+b,DTapBlk+(size_t)b*DL_TAPN*H);
+          mtp_commit(pos_n-k+b,blk[b],BXres+(size_t)b*H);
+        }
+      }else{
+        /* every block row became context: commit row by row */
+        for(int b=0;b<B;b++){
+          if(dflash_on)
+            dflash_commit(pos_n-B+1+b,DTapBlk+(size_t)b*DL_TAPN*H);
+          mtp_commit(pos_n-B+1+b,blk[b],BXres+(size_t)b*H);
+        }
       }
     }
     /* confirmed: accepted drafts are real context too; record them so hist
@@ -4921,6 +5007,9 @@ static int generate_tokens_spec(const int *tokens,int n_tok,int n_gen,
   fprintf(stderr,"spec: %lld cycles (%lld drafted, %lld full accept, %lld short; "
                  "avg kept %.2f)\n",cyc,draft_cyc,full,rej,
           draft_cyc?(double)acc_sum/(double)draft_cyc:0.0);
+  if(mtp_use&&Scfg_debug)
+    fprintf(stderr,"mtp: step %.2fs/%ld  head %.2fs/%ld  commit %.2fs\n",
+            mtp_t_step,mtp_n_step,mtp_t_head,mtp_n_head,mtp_t_commit);
   return n;
 }
 
@@ -5089,6 +5178,11 @@ int main(int argc, char **argv) {
   }
   load_model(model);
   if(dflash_on) load_dflash(dfpath);
+  /* nextn only drafts when speculation is on and no trained drafter outranks
+     it; CWEN_MTP=0 forces it off so the n-gram path can be A/B'd on a model
+     that carries blk.64. */
+  { int want=1; env_bool("CWEN_MTP",&want);
+    mtp_use = mtp_on && want && spec_enabled && !dflash_on; }
   alloc_state();
   if(g_residency) residency_init();
   { const char *ngc=getenv("CWEN_NGRAM_CACHE");

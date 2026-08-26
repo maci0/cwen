@@ -38,6 +38,14 @@ jobs:
       - name: python deps (tools)
         run: make setup
 
+      # Compile only, and first so the AVX2 build below is what later steps
+      # run: the runner may lack AVX-512, but the branches behind
+      # -DCWEN_AVX512 still have to typecheck. Two of them (dot_q8s,
+      # dot_q8si) sat broken for a release because nothing built this
+      # config, and an unaligned-load fault behind -flto shipped the same way.
+      - name: build (AVX-512, compile only)
+        run: make AVX512=1
+
       - name: build (AVX2)
         run: make
 
